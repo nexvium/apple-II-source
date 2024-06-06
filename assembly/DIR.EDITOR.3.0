@@ -1,0 +1,1089 @@
+* Directory Editor 3.0
+* By Javier Alvarado
+* Copyright (C) 1992
+* Paragon Systems
+* April 11, 1992
+
+CH       EQU $24        ;Cursor column
+CV       EQU $25        ;Cursor row
+INVFLG   EQU $32        ;Inverse flag
+MEMSIZ   EQU $73        ;HIMEM
+TXBUF2   EQU $280       ;Pathname buffer
+DOSWRM   EQU $3D0       ;Warm start ProDOS
+OURCH    EQU $57B       ;80-column horizontal position
+PRINTERR EQU $BE0C      ;Print error message
+BADCALL  EQU $BE8B      ;Convert MLI to BI error
+MLI      EQU $BF00      ;Machine Language Interface
+KEY      EQU $C000      ;Keypress storage
+STROBE   EQU $C010      ;Keypress strobe
+BUTN0    EQU $C061      ;Open-Apple
+BUTN1    EQU $C062      ;Closed-Apple
+C3ROM    EQU $C300      ;Go into 80-column mode
+DEVNUM   EQU $BF30      ;Slot and drive of active device
+PRBLNK   EQU $F948      ;Print 3 spaces
+PRBL2    EQU $F94A      ;Print X spaces
+HOME     EQU $FC58      ;Clear screen
+CLREOP   EQU $FC42      ;Clear to end of page
+CLREOL   EQU $FC9C      ;Clear to end of line
+CROUT    EQU $FD8E      ;Print a carriage return
+PRBYTE   EQU $FDDA      ;Print an 8-bit hex number
+COUT     EQU $FDED      ;Print a character
+BELL     EQU $FF3A      ;Ring the bell
+
+DPTR     EQU $FA        ;Pointer to data buffer
+DPTR1    EQU $FE        ;Another pointer to data buffer
+SPTR     EQU $FC        ;Pointer to selected file
+PBUF     EQU $1300      ;Buffer for file pointers
+OBUF     EQU $1600      ;Buffer for open call
+KBUF     EQU $1A00      ;Buffer for key directory block
+PARPTR   EQU KBUF+$27   ;Parent.Pointer
+PARENTNM EQU KBUF+$29   ;Parent.Entry.Number
+DBUF     EQU $1C00      ;Buffer for R/W ON_LINE calls
+DIRFILES EQU DBUF+4     ;Start of directory entries
+ENTLEN   EQU DBUF+$23   ;Entry.Length
+ENTPBLK  EQU DBUF+$24   ;Entries.Per.Block
+FILCNT   EQU DBUF+$25   ;File.Count
+
+         ORG $900
+
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+* PROGRAM CONTROL:
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+RESTART  LDA #$81       ;Non-printable char
+         JSR C3ROM      ;Turn on 80-columns
+         JSR CLOSEALL   ;Go close all files
+         LDA #$FF
+         STA ROUTEFLG   ;Flag volume menu
+         LDA #$06
+         JSR SETROW
+         LDA #25
+         STA $20
+         LDX #TXTTITLE
+         LDA #<TXTTITLE
+         JSR PRINTTXT
+         STZ $20        ;Set back to full screen
+
+*----------------------------
+* Select Online Volume:
+*----------------------------
+SELCTVOL JSR MLI        ;Do ON_LINE call
+         HEX C5
+         DA  OLPARM
+         BCS :2         ;MLI error
+         JSR HOME
+         JSR PRTHELP1   ;Print instructions
+         LDA #$00       ;Select first line
+         STA SELLIN     ;in volume menu
+         STA TOPSCR     ;(always top screen line)
+         STA TXBUF2     ;Zero length byte in TXBUF2
+         STA $FE
+:1       JSR PRTVOL     ;Print online volumes
+:2       BCS THERR      ;No volume on line
+         JSR GETMKEY    ;Get command keypress
+         BCC :1         ;Arrow key pressed
+         BNE SELCTVOL   ;Esc restarts volume search
+         EOR #$8D       ;EQ=Examine, NE=Quit
+         BNE CKEXIT     ;Quit if you agree
+
+*----------------------------
+* Process File in Directory:
+*----------------------------
+PROCDIR  JSR SETTXB     ;Put file name in TXBUF2
+         BCS THER1      ;Deleted file is mismatch
+         JSR CKFINFO    ;Check for directory file
+         BCS HANDLERR   ;Non-DIR file is mismatch
+BACKDIR  JSR GETKYBLK   ;Get key block from file entry
+PROCDIR1 JSR GETDIR     ;Read directory into memory
+         BCS HANDLERR   ;MLI error or Range error
+         JSR SCANDIR    ;Scan directory
+         BCS HANDLERR   ;Range error (>256 line)
+         LSR ROUTEFLG   ;Flag directory menu
+         JSR HOME
+         JSR PRTHELP2   ;Print instructions
+         BIT SELFLG
+         BMI :1         ;Selected line unchanged
+         LDA #$00       ;Select first line in directory
+         STA SELLIN     ;menu and start printing
+         STA TOPSCR     ;from top of directory
+:1       LSR SELFLG     ;Clear select flag
+         LSR SWAPFLG    ;Clear swap flag
+:2       JSR PRTDIR     ;Print directory files
+         JSR GETMKEY    ;Get command keypress
+         BCC :2         ;Arrow key struck
+         STA CMDCHAR    ;Hold the result
+         BIT SWAPFLG
+         BPL :3         ;Directory not altered
+         JSR SETPAR     ;Set parent pointers
+         BCS HANDLERR   ;MLI error
+         JSR WRITDIR    ;Write altered directory to disk
+         BCS HANDLERR   ;MLI error
+:3       LDA CMDCHAR    ;Restore command
+         SEC
+         SBC #$9B       ;EQ=Restart, MI=Examin, PL=Quit
+         BMI PROCDIR    ;Rtn examines another directory
+         BEQ BACKUP     ;Esc backs up one level
+         BIT SWAPFLG    ;Q quits if you agree
+         BMI CKEXIT1    ;Swap mode, so do not clear box
+CKEXIT   JSR CLRBOX     ;Clear instruction box
+CKEXIT1  JSR CKQUIT     ;Check exit
+         BCC QUIT       ;YES means we're done
+         BIT ROUTEFLG
+         BMI TORSTART   ;Restart from volume menu
+         BPL REPRINT    ;Always reprint directory menu
+         BRA QUIT
+THERR    BRA HANDLERR
+THER1    BRA HANDLER1
+BACKUP   LDA $FE
+         BMI TORSTART
+         JSR STRIPTXB   ;Strip 1 file level
+         LDA TXBUF2
+         BNE BACKDIR
+         BRA TORSTART
+QUIT     JSR HOME       ;Clear the screen
+         JSR CROUT
+         JMP DOSWRM     ;Warm start BASIC.SYSTEM
+
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+* ERROR HANDLER:
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+HANDLERR JSR STRIPTXB   ;Strip 1 file level from TXBUF2
+HANDLER1 JSR CLRBOX     ;Clear instruction box
+         CMP #$64
+         BNE :1
+         LDX #TXT2LONG
+         LDA #<TXT2LONG
+         JSR PRINTTXT
+         BRA :2
+:1       STA $FF
+         JSR BADCALL    ;Convert MLI error to BI error
+         JSR PRINTERR   ;Print BI error message
+         LDX #TXTMLIER
+         LDA #<TXTMLIER
+         JSR PRINTTXT
+         LDA $FF
+         JSR PRBYTE
+:2       LDX #TXTPAUSE
+         LDA #<TXTPAUSE
+         JSR PRINTTXT   ;Print message
+         JSR GETKEY     ;Pause for a keypress
+         BIT ROUTEFLG   ;Check error direction
+         BMI TORSTART   ;Fatal error
+REPRINT  LDA KEYBLK     ;Restore key block
+         STA CURBLK     ;of (sub)directory
+         LDA KEYBLK+1
+         STA CURBLK+1
+         LDA #$FF
+         STA SELFLG     ;Preserve selected line
+         JSR CLOSEALL   ;Close all files
+         JMP PROCDIR1   ;Reprint directory menu
+TORSTART JMP RESTART    ;Restart volume search
+
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+* SUBROUTINES:
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+*----------------------------
+* Print Line of Text:
+*----------------------------
+PRINTTXT STX :1+1       ;Self modifying code!
+         STA :1+2
+         LDX #$00
+:1       LDA KEY,X
+         BEQ :2
+         JSR COUT
+         INX
+         BRA :1
+:2       RTS
+
+*----------------------------
+* Print Help Box:
+*----------------------------
+PRTHELP1 LDX #13
+         HEX 2C         ;Skip next instruction
+PRTHELP2 LDX #7
+         LDA #19
+         JSR SETROW     ;Start at 21st row
+         LDA #$1B       ;Turn on MouseText
+         JSR COUT
+         LDA #$0F
+         JSR COUT
+         LDA #"S"       ;Dash Mouse character
+         LDY #80        ;printed 80 times
+:1       JSR COUT
+         DEY
+         BNE :1
+         LDA #$0E       ;Turn off MouseText
+         JSR COUT
+         LDA #$18
+         JSR COUT
+         JSR PRBL2      ;Uses entry X-reg to center line
+         LDX #TXTHELP1
+         LDA #<TXTHELP1
+         JSR PRINTTXT   ;Print help line
+         BIT ROUTEFLG
+         BMI :2         ;Handling volume menu
+         LDX #TXTHELP2
+         LDA #<TXTHELP2
+         JSR PRINTTXT   ;Add to help line
+:2       JSR CROUT
+         JSR CROUT
+
+*----------------------------
+* Tittle Message:
+*----------------------------
+         LDX #TXTCAT
+         LDA #<TXTCAT
+         JSR PRINTTXT   ;Print title message
+         LDA #$EE       ;Print last "n" without
+         STA $07F7      ;scrolling screen
+         RTS
+
+*----------------------------
+* Close All Files:
+*----------------------------
+CLOSEALL JSR MLI        ;Do CLOSE call
+         HEX CC
+         DA  CLPARM
+         RTS            ;CC (no error) expected
+
+*----------------------------
+* Check For Selected Line:
+*----------------------------
+CKSELLIN LDA CURLIN
+         CMP SELLIN
+         BNE :1         ;Current line not selected
+         LDA DPTR       ;Point SPTR at selected entry
+         STA SPTR
+         LDA DPTR+1
+         STA SPTR+1
+         LDA #$3F       ;Set inverse
+         STA INVFLG     ;text mode
+:1       RTS
+
+*--------------------------------
+* Get Key Block of Selected File:
+*--------------------------------
+GETKYBLK BIT ROUTEFLG
+         BPL :2         ;No file read into DBUF
+         LDA #$00       ;Key volume directory
+         LDX #$02       ;block always $0002
+         BRA :3
+:2       LDY #$11
+         LDA (SPTR),Y   ;Key subdirectory block LSB
+         TAX            ;in X-register
+         INY
+         LDA (SPTR),Y   ;Key subdir block MSB in Acc
+:3       STA CURBLK+1   ;Save key block MSB
+         STX CURBLK     ;Save key block LSB
+         RTS
+
+*-------------------------------
+* Print Filename in Data Buffer:
+*-------------------------------
+PRTDBUF  LDY #$00
+         LDA (DPTR),Y   ;Get 1st byte
+         AND #$0F       ;Isolate name length
+         BNE *+2
+         LDA #$0F       ;Deleted file
+         TAX            ;X-reg is name length counter
+:1       INY            ;Y-reg indexes DBUF
+         LDA (DPTR),Y
+         BEQ :2
+         ORA #$80       ;Convert to negative ASCII
+         JSR COUT
+         DEX
+         BNE :1         ;Loop back for another char
+         INY
+:2       DEY
+         CPY #15
+         BCS :3         ;15 characters printed
+         LDA #$A0       ;Fill with spaces
+         JSR COUT
+         INY            ;Bump char count
+         BRA :2
+:3       LDA #$FF       ;Restore normal
+         STA INVFLG     ;text mode
+         JMP CROUT
+
+*----------------------------
+* Clear Instruction Box:
+*----------------------------
+CLRBOX   PHA            ;Save Accumulator
+         LDA #20
+         JSR SETROW     ;22nd row
+         JSR CLREOP
+         PLA            ;Restore Accumulator
+         RTS
+
+*----------------------------
+* Set Row:
+*----------------------------
+SETROW   STA CV
+         JMP CROUT
+
+*----------------------------
+* Print Online Volumes:
+*----------------------------
+PRTVOL   LDA #$99       ;Ctrl-Y
+         JSR COUT       ;Home cursor with screen intact
+         LDX #TXTSLDRV
+         LDA #<TXTSLDRV
+         JSR PRINTTXT   ;Print column headers
+         LDA #$FF       ;Prepare to zero
+         STA CURLIN     ;line count
+         LDA #DBUF      ;Point at ON_LINE buffer
+         STA DPTR
+         STA DBUF+256   ;In case of sixteen block devices
+         LDA #<DBUF
+         STA DPTR+1
+:1       LDY #$00
+         LDA (DPTR),Y   ;Get first byte in volume entry
+         BEQ :4         ;Zero byte marks end of list
+         AND #$0F       ;Isolate length byte
+         BEQ :2         ;Zero length indicates error
+         INC CURLIN     ;Bump line count
+         JSR CKSELLIN   ;Check if current line selected
+         LDA (DPTR),Y   ;Get first entry byte again
+         LSR            ;Shift high nibble
+         LSR            ;into low nibble
+         LSR
+         LSR
+         AND #$07       ;Isolate slot bits
+         ORA #"0"       ;Convert to negative ASCII
+         JSR COUT       ;Print slot number
+         LDA #"/"
+         JSR COUT       ;Print slash
+         LDA (DPTR),Y   ;Get 1st entry byte again
+         ASL            ;Drive 1=CC, drive 2=CS
+         LDA #"1"       ;Default to drive 1
+         ADC #$00       ;Pick up carry
+         JSR COUT       ;Print drive number
+         JSR PRBLNK
+         JSR PRTDBUF    ;Print volume name
+:2       CLC
+         LDA DPTR       ;Bump pointer by
+         ADC #16        ; 16 chars per
+         STA DPTR       ; ON_LINE entry
+         BCC :3
+         INC DPTR+1
+:3       BRA :1
+:4       SEC            ;Anticipate no online volume
+         LDA CURLIN
+         BMI :5         ;No online volume
+         STA TOTLIN     ;Save total menu lines
+         CLC            ;Signal no error
+:5       RTS            ;CC=Online vol, CS=No online vol
+
+*----------------------------------
+* Strip One File Level from TXBUF2:
+*----------------------------------
+STRIPTXB PHA            ;Save Accumulator
+         LDX TXBUF2     ;Get length byte
+:1       LDA TXBUF2,X   ;Get TXBUF2 char
+         DEC TXBUF2     ;Reduce length
+         DEX            ;until
+         CMP #'/'       ;slash found
+         BNE :1         ;No slash yet
+         PLA            ;Restore entry Accumulator
+         RTS
+
+*------------------------------------
+* Print Directory Pathname in TXBUF2:
+*------------------------------------
+PRTTXB   LDX #$00
+:1       LDA TXBUF2+1,X ;Get char
+         ORA #$80       ;Convert to negative ASCII
+         JSR COUT
+         INX
+         CPX TXBUF2     ;Check length byte
+         BCC :1         ;Go back for more
+         JSR CLREOL
+         JMP CROUT
+
+*----------------------------
+* Set Parent Pointers:
+*----------------------------
+SETPAR   LDA DEVNUM     ;Stuff device number
+         STA RWBUNUM    ;into parmlist
+         LDA #KBUF      ;Set buffer in
+         STA RWBLKBUF   ; R/W_BLOCK parmlist
+         LDA #<KBUF
+         STA RWBLKBUF+1
+         LDA FILCNT
+         STA FCNTTEMP   ;No. of active fiilees in dir.
+         LDX ENTPBLK
+         INX
+         STX EPBTEMP    ;No. of entries+1 per block
+         LDA #$00
+         STA DPTR1      ;Point at start of block LSB
+:1       STA TEMP       ;Save block offset
+         LDX #$01       ;X-Reg=entry number within block
+         LDA #DIRFILES  ;Point at start of files
+         STA DPTR       ;in current block LSB
+         CLC
+         LDA #<DIRFILES ;Point at start
+         ADC TEMP       ;of files in
+         STA DPTR+1     ;current block MSB
+         STA DPTR1+1    ;Point at start of block MSB
+:2       LDY #$00
+         LDA (DPTR),Y   ;Get Storage.Type/Name.Length
+         BEQ :4         ;Deleted file
+         AND #$F0       ;Isolate Storage.Type
+         CMP #$E0
+         BCS :4         ;Directory header doesn't count
+         CMP #$D0
+         BNE :3         ;Directory file not found
+         LDY #$11
+         LDA (DPTR),Y   ;Get Key.Pointer LSB and stuff
+         STA RWBLKNUM   ;in R/W_BLOCK parmlist
+         INY
+         LDA (DPTR),Y   ;Get Key.Pointer MSB and stuff
+         STA RWBLKNUM+1 ;in R/W_BLOCK parmlist
+         JSR MLI        ;Do READ_BLOCK call
+         HEX 80         ;to read block of directory entry
+         DA  RWBLPARM   ;directory entry
+         BCS TOFATER1   ;Fatal error
+         LDA CURBLK     ;Stuff current block number into
+         STA PARPTR     ; Parent.Pointer of header
+         LDA CURBLK+1
+         STA PARPTR+1
+         STX PARENTNM   ;Reset Parent.Entry.Number
+         JSR MLI        ;Do WRITE_BLOCK call
+         HEX 81
+         DA  RWBLPARM
+         BCS TOFATER1   ;Fatal error
+:3       DEC FCNTTEMP   ;Reduce avtive file count
+         BEQ CLCRTS1    ;Done, with no MLI error
+:4       CLC
+         LDA DPTR       ;Advance to next file
+         ADC ENTLEN     ;in current block
+         STA DPTR
+         BCC :5
+         INC DPTR+1
+:5       INX            ;Bump file position in block
+         CPX EPBTEMP
+         BCC :2         ;Not at end of block
+         LDY #$02
+         LDA (DPTR1),Y  ;Get link LSB to next block
+         STA CURBLK     ;and save it
+         INY
+         LDA (DPTR1),Y  ;Get link MSB to next block
+         STA CURBLK+1   ;and save it
+         CLC
+         LDA TEMP
+         ADC #$02       ;Add 1 block to block offset
+         BRA :1
+
+*----------------------------
+* Write Directory to disk:
+*----------------------------
+WRITDIR  JSR CLRBOX     ;Clear instruction box
+         LDX #TXTWRIT
+         LDA #<TXTWRIT
+         JSR PRINTTXT   ;Print write request
+         JSR GETQKEY    ;Get Y/N answer
+         BCS WRITDIR2   ;NO writing to disk
+         LDA MYKEYBLK   ;Put key directory block number
+         STA RWBLKNUM   ;into R/W_BLOCK parmlist
+         LDA MYKEYBLK+1
+         STA RWBLKNUM+1
+         LDA #DBUF      ;Point at start of
+         STA DPTR       ;directory LSB
+         STA RWBLKBUF   ;Set R/W_BLOCK buffer LSB
+         LDA #<DBUF     ;Point at directory start MSB
+WRITDIR1 STA DPTR+1     ;Save directory pointer MSB
+         STA RWBLKBUF+1 ;Set R/W_BLOCK buffer MSB
+         JSR MLI        ;Do R/W_BLOCK call
+         HEX 81
+         DA  RWBLPARM
+TOFATER1 BCS TOFATER2   ;Fatal error
+         LDY #$02       ;Index first forward link byte
+         LDA (DPTR),Y   ;Get link LSB to next block
+         STA RWBLKNUM   ;and stuff it intto parmlist
+         INY
+         ORA (DPTR),Y   ;If both like bytes are zero,
+         BEQ WRITDIR2   ;no more block in directory
+         LDA (DPTR),Y   ;Get link MSB to next block
+         STA RWBLKNUM+1 ;and stuff it into the parmlist
+         LDA DPTR+1
+         ADC #$02       ;Add 1 block to block offset
+         BRA WRITDIR1
+WRITDIR2 JSR PRBLNK     ;Separator for quit message
+CLCRTS1  CLC            ;Signal no error
+         RTS            ;CC=No error, CS=Error
+
+*--------------------------------
+* Put Directory Path into TXBUF2:
+*--------------------------------
+SETTXB   LDY #$00
+         LDA (SPTR),Y   ;Get 1st byte
+         BEQ MISMERR    ;Deleted file is mismatch
+         AND #$0F       ;Isolate name length
+         STA TEMP       ;and save it
+         LDA #'/'       ;Start with file separator
+         LDX TXBUF2
+:1       INX            ;X-Reg indexes TXBUF2
+         INY            ;Y-Reg indexes DBUF
+         STA TXBUF2,X   ;Save name char in TXBUF2
+         LDA (SPTR),Y   ;Get next name char from DBUF
+         DEC TEMP       ;Reduce counter
+         BPL :1         ;Loop back for another char
+         STX TXBUF2     ;Length byte precedes name
+         CLC            ;Signal no error
+         RTS            ;CC=No error, CS=Error
+
+*----------------------------
+* Check File Info:
+*----------------------------
+CKFINFO  JSR MLI        ;Do GET_FILE_INFO call
+         HEX C4
+         DA  GFIPARM
+TOFATER2 BCS FATALERR   ;Fatal error
+         LDY GFIFITYP   ;Get file type
+         CPY #$0F
+         BNE MISMERR    ;Mismatch error
+         CLC            ;Signal no error
+         RTS            ;CC=No error, CS=Error
+
+*----------------------------
+* Load Directory File:
+*----------------------------
+GETDIR   JSR MLI        ;Do OPEN call
+         HEX C8
+         DA  OPPARM
+         BCS FATALERR   ;Fatal error
+         LDA OPREFNUM   ;Stuff file Ref.Num
+         STA RWREFNUM   ;into R/W parmlist
+         STA EOREFNUM   ; GET_EOF parmlist
+         JSR MLI        ;Do GET_EOF call
+         HEX D1
+         DA  EOFPARM
+         BCS FATALERR   ;MLI error
+         LDA EOF+1      ;Stuff directory file length
+         STA RWCOUNT+1  ;into R/W parmlist
+         LDA EOF
+         STA RWCOUNT
+         LDA MEMSIZ+1   ;Calculate memory available
+         SBC #<DBUF-256 ;(compensate for clear carry)
+         CMP EOF+1
+         BCC BUFERR     ;Available memory < file length
+         JSR MLI        ;Do READ call
+         HEX CA
+         DA  RWPARM
+         BCC :1         ;No MLI error
+         CMP #$4C
+         BNE FATALERR   ;Not RANGE ERROR
+:1       JSR CLOSEALL   ;Close file
+         LDA FILCNT+1
+         BNE RANGERR    ;>255 files in directory
+         ORA FILCNT
+         BEQ RANGERR    ;No files in directory
+         CLC            ;Signal no error
+         RTS            ;CC=No error, CS=Error
+
+*----------------------------
+* Error Direction:
+*----------------------------
+BUFERR   LDA #$56       ;NO BUFFERS AVAILABLE
+         BRA SECRTS
+MISMERR  LDA #$4B       ;FILE TYPE MISMATCH code
+         BRA SECRTS
+RANGERR  LDA #$4D       ;RANGE ERROR
+         BRA SECRTS
+COUNTERR LDA #$64
+         BRA SECRTS
+FATALERR LDY #$FF
+         STY ROUTEFLG   ;Restart volume search
+SECRTS   SEC            ;Signal no error
+         RTS
+
+*----------------------------
+* Scan Directory:
+*----------------------------
+SCANDIR  LDA FILCNT
+         CMP #65
+         BCS COUNTERR
+         STA FCNTTEMP   ;No. of active files in directory
+         LDX #$00       ;Zero line count and block
+         TXA            ;offset from start of directory
+:1       STA TEMP       ;Save block offset
+         LDA ENTPBLK
+         STA EPBTEMP    ;Number of file entries in block
+         LDA #DIRFILES  ;Point at start of files
+         STA DPTR       ;in current block LSB
+         CLC
+         LDA #<DIRFILES ;Point at start
+         ADC TEMP       ;of files in
+         STA DPTR+1     ;current block MSB
+:2       LDA DPTR       ;Get file pointer LSB
+         STA PBUF,X     ;and save it
+         LDA DPTR+1     ;Get file pointer MSB
+         STA PBUF+256,X ;and save it
+         LDY #$00
+         LDA (DPTR),Y   ;Get Storage.Type/Name.Length
+         BEQ :3         ;Deleted file
+         AND #$F0       ;Isolate Storage.Type
+         CMP #$E0
+         BCS :5         ;Directory header doesn't count
+         LDY #$10       ;Active file being scanned
+         LDA (DPTR),Y   ;Get File.Type
+:3       STA PBUF+512,X ;and save it
+         BEQ :4         ;Hex zero flag deleted file
+         DEC FCNTTEMP   ;Reduce active file count
+         BEQ :7         ;Done, with no range errror
+:4       INX            ;Bump entry count
+         BEQ RANGERR    ;>256 lines give range error
+:5       CLC
+         LDA DPTR       ;Advance to next file
+         ADC ENTLEN     ;in current block
+         STA DPTR
+         BCC :6
+         INC DPTR+1
+:6       DEC EPBTEMP    ;Decrement files per block count
+         BNE :2         ;Not at end of block
+         CLC            ;At end of block so
+         LDA TEMP       ;advance to next block
+         ADC #$02       ; (2 pages per block)
+         BRA :1
+:7       STX TOTLIN     ;Save total number of lines
+         CPX SELLIN     ;Conpensate for a
+         BCS :8         ;disappearing
+         STX SELLIN     ;selected
+         LDA TOPSCR     ;deleted file
+         BEQ :8         ;at end of directory
+         DEC TOPSCR     ;(after swap)
+:8       LDA CURBLK     ;Save key block number
+         STA KEYBLK     ;current directory in case
+         STA MYKEYBLK
+         LDA CURBLK+1   ;of nonfatal error
+         STA KEYBLK+1   ;of next go-round
+         STA MYKEYBLK+1
+         CLC            ;Signal no error
+         RTS            ;CC=No error, CS=Error
+
+*----------------------------
+* Print Directory:
+*----------------------------
+PRTDIR   LDA #$99       ;Ctrl-Y
+         JSR COUT       ;Home cursor with screen intact
+         LDX #TXTPATH
+         LDA #<TXTPATH
+         JSR PRINTTXT
+         JSR PRTTXB     ;Print directory name
+         LDA #$00       ;1st file column is at
+         STA COLUMN     ;left edge of screen
+         LDA #64        ;No more than 64
+         STA MAXSCR     ;files on screen
+         LDX TOPSCR     ;Set 1st screen line
+         DEX            ;Prepare to zero PBUF index
+         STX CURLIN     ;and line count
+:1       LDA #$01
+         JSR SETROW     ;3rd row
+         LDA #16        ;No more than 16 lines
+         STA ROW        ;in one column
+:2       INX            ;Bump PBUF index
+         INC CURLIN     ;Bump line count
+         JSR PRTENTRY   ;Print file entry
+         CPX TOTLIN
+         BCS :3         ;Last directory line printed
+         DEC MAXSCR     ;Reduce max screen file count
+         BEQ :1         ;We're done printing
+         DEC ROW        ;Reduce max row count
+         BNE :2         ;Room for more files in column
+         LDA COLUMN     ;Bump file count
+         ADC #20        ; (20 chars per column)
+         STA COLUMN
+         BRA :1
+:3       LDA COLUMN
+         STA OURCH
+         JMP CLREOL
+*----------------------------
+* Print Directory Entry:
+*----------------------------
+PRTENTRY TXA
+         PHA            ;Save X-reg
+         LDA PBUF,X     ;Set pointer to file
+         STA DPTR
+         LDA PBUF+256,X
+         STA DPTR+1
+         LDA COLUMN
+         STA OURCH      ;Set file column
+         JSR CKSELLIN   ;Check if current line selected
+         LDY #$00       ;Y-Reg indexes FITTXTBL
+         LDA PBUF+512,X ;Get file type code
+         LDX #$1E       ;Set FITYPTBL index
+:1       CMP FITYPTBL,X ;Check table of file type codes
+         BEQ :2         ;Gotcha!
+         INY            ;Bump FITXTTBL index 3 bytes
+         INY
+         INY
+         DEX
+         BPL :1         ;Loop back for more
+         PHA            ;Save unfound file type code
+         LDA #"$"
+         JSR COUT       ;Print dollar sign
+         PLA            ;Restore unfound file type
+         JSR PRBYTE     ;code and print it
+         BRA :4
+:2       LDX #$03       ;Print file type (3 bytes)
+:3       LDA FITXTTBL,Y
+         JSR COUT
+         INY
+         DEX
+         BNE :3
+:4       LDA #$A0
+         JSR COUT       ;Print space
+         JSR PRTDBUF    ;Print file entry
+         PLA
+         TAX            ;Restore entry X-reg
+         RTS
+
+*----------------------------
+* Get and Print Y/N Response:
+*----------------------------
+GQKEYERR JSR BELL
+GETQKEY  JSR GETKEY
+         AND #$DF
+         CMP #"N"
+         BEQ :1
+         CMP #"Y"
+         BNE GQKEYERR
+         CLC
+:1       PHP
+         JSR COUT
+         PLP
+         RTS            ;CS=No, CC=Yes
+
+*----------------------------
+* Check Quitting:
+*----------------------------
+CKQUIT   LDX #TXTQUIT
+         LDA #<TXTQUIT
+         JSR PRINTTXT
+         JMP GETQKEY    ;CS=No, CC=Yes
+
+*----------------------------
+* Get Menu Keypress:
+*----------------------------
+GMKEYERR JSR BELL
+GETMKEY  BIT BUTN0
+         BMI :1         ;Open-Apple key down
+         BIT BUTN1
+         BPL :2         ;Closed-Apple key not down
+:1       BIT RTS1       ;OA key down so set V-flag
+         BRA :3
+:2       CLV            ;Apple key not down so clear V-falg
+:3       LDA KEY        ;Check keypress
+         BPL GETMKEY    ;No keypress
+         STA STROBE     ;Got keypress so clear strobe
+         LDX SELLIN     ;X-Reg = original selected line
+         CMP #$E0
+         BCC :4         ;Not lower case
+         AND #$DF       ;Lowercase, so upshift
+:4       CMP #"Q"       ;Quit
+         BEQ RTS1
+         CMP #$8D       ;Examine
+         BEQ RTS1
+         CMP #$8A       ;Down arrow
+         BEQ DWNARW
+         CMP #$8B       ;Up arrow
+         BEQ UPARW
+         CMP #$95       ;Right arrow
+         BEQ FWDARW
+         CMP #$88       ;Left arrow
+         BEQ BCKARW
+         CMP #$9B       ;Escape
+         BNE GMKEYERR   ;Invalid keypress
+         BVC *+3
+         DEC $FE
+         CLV
+         LDA #$9B       ;Clear Z-flag
+RTS1     RTS            ;Eq=Q or Rtn, Ne=Esc
+
+*----------------------------
+* Up Arrow Handler:
+*----------------------------
+UPARW    BVS UPSWAP     ;OA down so swap
+UPARW1   LDY SELLIN
+         BEQ UPARW2     ;1st line currently selected
+         CPY TOPSCR
+         BNE :1         ;Top of screen not selected
+         DEC TOPSCR     ;Start displaying one higher line
+:1       DEY            ;Select prior line
+ENDARW   STY SELLIN     ;Set selected line
+         CLC
+         RTS
+UPARW2   LDY CURLIN     ;Select bottom line of screen
+         JMP ENDARW
+UPSWAP   JSR UPARW1     ;Y-Reg=New selected line
+         BRA DOSWAP
+
+*----------------------------
+* Down Arrow Handler:
+*----------------------------
+DWNARW   BVS DWNSWAP    ;OA down so swap
+DWNARW1  LDY SELLIN
+         CPY TOTLIN
+         BEQ DWNARW2    ;Last line currently selected
+         CPY CURLIN
+         BNE :1         ;Bottom of screen not selected
+         INC TOPSCR     ;Start displaying one lower line
+:1       INY            ;Select next line
+         BRA ENDARW
+DWNARW2  LDY TOPSCR     ;Select top line on screen
+         JMP ENDARW
+DWNSWAP  JSR DWNARW1    ;Y-Reg=New selected line
+         BRA DOSWAP
+
+*----------------------------
+* Right Arrow Handler:
+*----------------------------
+FWDARW   BVS FWDSWAP    ;OA down so swap
+FWDARW1  CLC
+         LDA SELLIN     ;Get selected line
+         TAY            ;Save selected line in Y-reg
+         ADC #16        ;16 lines per column
+         CMP CURLIN
+         BEQ GOODARW    ;Valid arrow
+         BCS BADARW     ;Invalid arrow
+GOODARW  TAY            ;Select new line
+BADARW   JMP ENDARW
+FWDSWAP  JSR FWDARW1    ;Y-Reg=New selected line
+         BRA SIDESWAP
+
+*----------------------------
+* Back Arrow Handler:
+*----------------------------
+BCKARW   BVS BCKSWAP    ;OA down so swap
+BCKARW1  SEC
+         LDA SELLIN     ;Get selected line
+         TAY
+         SBC #16        ;16 lines per column
+         BCC BADARW     ;Invalid arrow
+         PHA
+         SBC TOPSCR
+         PLA
+         BCC BADARW     ;Invalid arrow
+         BRA GOODARW    ;Valid arrow
+BCKSWAP  JSR BCKARW1    ;Y-Reg=New selected line
+SIDESWAP CPX SELLIN
+         BEQ CLCRTS2    ;Selected line unchanged
+
+*----------------------------
+* Swap File Entries:
+*----------------------------
+DOSWAP   BIT ROUTEFLG
+         BMI CLCRTS2    ;Disable swap in volume menu
+         LDA TOTLIN
+         BEQ CLCRTS2    ;You can't swap one line
+         LDA #$FF
+         STA SWAPFLG    ;Set swap flag
+         LDA PBUF,Y     ;Set pointer to new selection
+         STA DPTR       ; SPTR=Original selection
+         LDA PBUF+256,Y ; DPTR=New selection
+         STA DPTR+1
+         LDA PBUF+512,X ;Swap file types
+         PHA
+         LDA PBUF+512,Y
+         STA PBUF+512,X
+         PLA
+         STA PBUF+512,Y
+         LDY #$00       ;Swap file entries
+:1       LDA (SPTR),Y
+         PHA
+         LDA (DPTR),Y
+         STA (SPTR),Y
+         PLA
+         STA (DPTR),Y
+         INY
+         CPY ENTLEN
+         BCC :1
+CLCRTS2  CLC            ;Signal arrow key
+         RTS
+
+*----------------------------
+* Get A Key With Cursor:
+*----------------------------
+GETKEY   BIT STROBE     ;Clear strobe
+:1       LDA #"_"       ;Load cursor
+         LDY #$01       ;Signal cursor
+:1A      JSR COUT       ;Print it
+         LDA #$88
+         JSR COUT
+         LDA #$55       ;Set blinking rate
+         LDX #$FF
+:2       BIT KEY        ;Any keys?
+         BMI :3
+         DEX
+         BNE :2
+         DEA
+         BNE :2
+         CPY #$00       ;Is it blank cursor?
+         BEQ :1         ;Yes, do underline
+         LDA #$A0       ;Erase cursor
+         DEY
+         BRA :1A
+:3       LDA #$A0       ;Erase cursor
+         JSR COUT
+         LDA #$88
+         JSR COUT
+         LDA KEY
+         BIT STROBE
+         RTS            ;It's all done
+
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+* PARAMETER LISTS:
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+OLPARM   HEX 02         ;ON_LINE Parmlist
+         HEX 00         ;Unit.Num (all volumes)
+         DA  DBUF       ;Data buffer
+
+EOFPARM  HEX 02         ;SET/GET_EOF Parmlist
+EOREFNUM HEX 00         ;Ref.Num
+EOF      DS  03         ;EOF
+
+OPPARM   HEX 03         ;OPEN Parmlist
+         DA  TXBUF2     ;Path.Pointer
+         DA  OBUF       ;I/O.Buffer
+OPREFNUM HEX 00         ;Ref.Num
+
+RWPARM   HEX 04         ;READ/WRITE Parmlist
+RWREFNUM HEX 00         ;Ref.Num
+         DA  DBUF       ;Data.Buffer
+RWCOUNT  DA  0          ;Request.Count
+         DA  0          ;Trans.Count
+
+CLPARM   HEX 01         ;CLOSE parmlist
+         HEX 00         ;Ref.Num (all files)
+
+GFIPARM  HEX 0A         ;SET/GET_FILE_INFO Parmlist
+         DA  TXBUF2     ;Path.Pointer
+         HEX 00         ;Access
+GFIFITYP HEX 00         ;File.Type
+         DS  13         ;Other stuff
+
+RWBLPARM HEX 03         ;READ/WRITE_BLOCK Parmlist
+RWBUNUM  HEX 00         ;Unit.Num
+RWBLKBUF DA  0          ;Data.Buffer
+RWBLKNUM DA  0          ;Block.Num
+
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+* STORAGE:
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+ROUTEFLG HEX 00         ;PL=Directory, MI=Volume
+SELFLG   HEX 00         ;PL=Select top, MI=Select same
+SWAPFLG  HEX 00         ;PL=No swap, MI=Swap
+CMDCHAR  HEX 00         ;Command character
+TEMP     HEX 00         ;Temporary storage
+FCNTTEMP HEX 00         ;Active files remaining
+EPBTEMP  HEX 00         ;File entries per block
+COLUMN   HEX 00         ;Column-1 of directory printout
+ROW      HEX 00         ;Row of directory printout
+SELLIN   HEX 00         ;Selected line-1 in file menu
+CURLIN   HEX 00         ;Current/bottom line-1 in menu
+TOPSCR   HEX 00         ;Top screen line-1 of directory
+MAXSCR   HEX 00         ;Maximum lines on screen
+TOTLIN   HEX 00         ;Total lines-1 in directory
+KEYBLK   DS  2          ;Key block of directory
+CURBLK   DS  2          ;Current directory block
+MYKEYBLK DS  2
+
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+* TABLES:
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+FITYPTBL HEX FF         ;SYS SYStem file
+         HEX FE         ;REL RELocatable
+         HEX FD         ;VAR Applesoft VARiable
+         HEX FC         ;BAS Applesoft BASic
+         HEX FB         ;IVR Interger VaRiable
+         HEX FA         ;INT INTeger basic
+         HEX F7         ;IMG IMaGe
+         HEX F0         ;CMD CoMmanD
+         HEX EF         ;PAS PAScal
+         HEX CA         ;ICN ICoNs
+         HEX C9         ;FND FiNDer
+         HEX C1         ;PIC PICture
+         HEX BF         ;DOC DOCument
+         HEX BB         ;DRV DRiVer
+         HEX B7         ;TIF Tagged Image Format
+         HEX B6         ;PIF Picture Image Format
+         HEX B5         ;EXE EXEcutable
+         HEX B1         ;OBJ OBJect file
+         HEX B0         ;SRC SouRCe file
+         HEX 5A         ;CFG ConFiGuration
+         HEX 1A         ;AWP Appleworks Word Processor
+         HEX 1B         ;ASP Appleworks SpreadSheet
+         HEX 19         ;ADB Appleworks Data Base
+         HEX 0F         ;DIR DIRectory
+         HEX 0C         ;SOS S Operating System
+         HEX 0B         ;WPF Word Processor File
+         HEX 07         ;FNT FoNT
+         HEX 06         ;BIN BINary
+         HEX 04         ;TXT TeXT
+         HEX 01         ;BAD file
+         HEX 00         ;DEL DELeted file (Non-standard)
+
+FITXTTBL ASC "DEL"
+         ASC "BAD"
+         ASC "TXT"
+         ASC "BIN"
+         ASC "FNT"
+         ASC "WPF"
+         ASC "SOS"
+         ASC "DIR"
+         ASC "ADB"
+         ASC "ASP"
+         ASC "AWP"
+         ASC "CFG"
+         ASC "SRC"
+         ASC "OBJ"
+         ASC "EXE"
+         ASC "PIF"
+         ASC "TIF"
+         ASC "DRV"
+         ASC "DOC"
+         ASC "PIC"
+         ASC "FND"
+         ASC "ICN"
+         ASC "PAS"
+         ASC "CMD"
+         ASC "IMG"
+         ASC "INT"
+         ASC "IVR"
+         ASC "BAS"
+         ASC "VAR"
+         ASC "REL"
+         ASC "SYS"
+
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+* TEXT:
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+TXTTITLE ASC "______________________________",8D,1B,0F
+         ASC "_",0E,18
+         ASC "                            ",1B,0F
+         ASC "Z",8D,DF,0E,18
+         ASC "    Directory Editor 3.0    ",1B,0F
+         ASC "Z",8D,DF,0E,18
+         ASC "     By Javier Alvarado     ",1B,0F
+         ASC "Z",8D,DF,0E,18
+         ASC "     Copyright (C) 1991     ",1B,0F
+         ASC "Z",8D,DF,0E,18
+         ASC "                            ",1B,0F
+         ASC "Z",8D
+         ASC "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLL",0E,18,00
+TXTHELP1 ASC "Esc: Back   Q: Quit   "
+         ASC "Rtn: Examine   Arrows: Select",00
+TXTHELP2 ASC "   "
+         HEX 1B,0F
+         ASC "A"
+         HEX 0E,18
+         ASC "-Arrow: Swap",00
+TXTCAT   ASC ' Directory Editor '
+         ASC " By Javier Alvarado   "
+         ASC "           Copyright (C) 1992 by Parago",00
+TXTSLDRV ASC "S/D   Volume name",8D,8D,00
+TXTPATH  ASC "Path: ",00
+TXTWRIT  ASC "Write directory to disk? ",00
+TXTMLIER ASC "MLI error $",00
+TXTPAUSE ASC ".  Press any key to continue.",00
+TXT2LONG ASC "Directory contains more that 64 files",00
+TXTQUIT  ASC "Do you want to quit? ",00

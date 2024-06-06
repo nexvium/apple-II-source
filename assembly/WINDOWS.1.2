@@ -1,0 +1,317 @@
+* Windows 1.2
+* By Javier Alvarado
+* Copyright (C) 1992
+* DefKar
+* January 20, 1992
+
+BUFF     EQU $05        ;Address of buffer
+CH       EQU $24        ;Horizontal cursor position
+BAS      EQU $28        ;Pointer to address of line
+LINNUM   EQU $50        ;Line number storage
+STREND   EQU $6D        ;Pointer to end of arrays
+FRETOP   EQU $6F        ;Pointer to end of string
+CHRGET   EQU $B1        ;Advance TXTPTR and get char
+ERROUT   EQU $BE09      ;Print BASIC.SYSTEM error
+GETBUFR  EQU $BEF5      ;Get buffer space
+RD80COL  EQU $C01F      ;Read 80-columns
+ERROR    EQU $D412      ;Print an Applesoft error
+FRMNUM   EQU $DD67      ;Evaluate number at TXTPTR
+CHKCOM   EQU $DEBE      ;Check for comma
+GETADR   EQU $E752      ;Make LINNUM an integer
+BASCALC  EQU $FBC1      ;Calculate vertical line address
+
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+* Set up Windows
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+         ORG $6000
+
+START    LDA DEST+1     ;Check destination address
+         CMP #$98
+         BEQ DEFAULT    ;Use default of program
+         BCS ERR        ;Can't be higher than $9800
+         BRA RELOCATE
+ERR      LDA #$0C       ;NO BUFFERS AVAILABLE
+         JMP ERROUT     ;Print it and exit
+DEFAULT  LDA #$02       ;We need two pages
+         JSR GETBUFR    ;Get them
+         BCS ERR        ;We got a problem here
+         STA DEST+1
+RELOCATE LDX #MVSTART   ;Get address of code
+         LDA #<MVSTART
+         STX $3A
+         STA $3B
+         LDA DEST+1     ;Get destination address
+         SEC
+         SBC #$08
+         STA $4E        ;Save offset
+         LDY #$00       ;Clear index
+:1       LDA ($3A),Y    ;Get Op Code from program
+         JSR $FD5D      ;Find info about Op Code
+         LDA $2F        ;Put length in Acc
+         CMP #$03       ;Is it three bytes long?
+         BEQ :4         ;Yes, relocate it
+:2       CLC            ;Point to next byte
+         ADC $3A
+         STA $3A
+         BCC :3
+         INC $3B
+:3       LDA $3B        ;Get page of location
+         CMP #<MVEND    ;Is it the end?
+         BNE :1         ;No, do next command
+         LDA $3A
+         CMP #MVEND
+         BNE :1
+         BRA MOVE       ;Relocation's done
+:4       INY            ;Point to high byte of address
+         INY
+         LDA ($3A),Y
+         CMP #<CHK_OURS ;Is address within program?
+         BCC :5         ;No, don't relocate
+         CMP #<CDEND+$100
+         BCS :5
+         CLC            ;Relocate command
+         ADC $4E
+         STA ($3A),Y    ;Put it back in program
+:5       LDY #$00       ;Clear index again
+         LDA #$03       ;Set length again
+         BRA :2         ;Advance pointer
+MOVE     LDX $3F6       ;Save current amper vector
+         LDA $3F7
+         STX MVSTART+1
+         STA MVSTART+2
+         LDX #MVSTART   ;Set start address
+         LDA #<MVSTART
+         STX $3C
+         STA $3D
+         LDX #MVEND     ;Set end address
+         LDA #<MVEND
+         STX $3E
+         STA $3F
+         LDX #$00       ;Set destination address
+DEST     LDA #$98
+         STX $42
+         STA $43
+         JSR $FE2C      ;Move routine
+         LDA #$4C       ;Set up amper vector
+         STA $3F5
+         LDX #$03
+         LDA DEST+1
+         STX $3F6
+         STA $3F7
+         RTS            ;Return to BASIC
+MVSTART  EQU *
+
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+* Windows Main Program:
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+         ORG $0800      ;For relocation purposes
+
+NOTOURS  JMP $0000      ;Check any other routines
+CHK_OURS CMP #'O'       ;Is it our command?
+         BEQ :3         ;Yes, it's ok
+         CMP #'C'
+         BEQ :2
+         CMP #'S'
+         BNE :1
+         JSR CHRGET     ;Move TXTPTR past command
+         JMP SETSCRN
+:1       CMP #'R'
+         BNE NOTOURS    ;No, pass to next
+         JSR CHRGET     ;Move TXTPTR past command
+         JMP RESTORE
+:2       LDA WNDOWMEM   ;Is a window in memory?
+         BEQ QUANTERR   ;If none, print error
+         LDA #$00       ;Flag to close window
+         BRA :4
+:3       LDA WNDOWMEM   ;Is a window in memory?
+         BNE QUANTERR   ;Yes, print error
+         LDA #$01       ;Flag to open window
+:4       BIT RD80COL    ;Are 80-columns on?
+         BPL SYNERR     ;No, exit with error
+         STA OCFLAG     ;Save flag
+         JSR CHRGET     ;Move TXTPTR past command
+         LDA OCFLAG     ;Are we opening or closing?
+         BEQ WINDOW     ;Closing, no parameters
+SYNTAX   LDX #$03       ;Index to get four parameters
+:1       STX NUMCHRS    ;Save index
+         JSR CHKCOM     ;Check for comma
+         JSR FRMNUM     ;Evaluate number at TXTPTR
+         JSR GETADR     ;Make LINNUM integer
+         LDA LINNUM     ;Get number
+         LDX NUMCHRS    ;Restore index
+         STA STORHEND,X ;Save parameters for later
+         DEX
+         BPL :1
+         LDA STORVSTR   ;Get vertical start line
+         CMP STORVEND   ;Make sure it's less than end
+         BCS QUANTERR   ;Illegal quantity
+         LDA STORVEND
+         CMP #25        ;Is end line >24?
+         BCS QUANTERR   ;Illegal quantity
+         LDA STORHSTR   ;Get column start for window
+         INC
+         CMP STORHEND   ;Make sure it's less than end
+         BCS QUANTERR
+         LDA STORHEND   ;Get end column for window
+         CMP #81        ;Is end column <81?
+         BCC WINDOW     ;Yes, continue
+QUANTERR LDX #53        ;ILLEGAL QUANTITY
+         BRA *+2
+SYNERR   LDX #16        ;SYNTAX ERROR
+         JMP ERROR      ;Print it and return to BASIC
+WINDOW   LDX #$03       ;Copy parameters
+:1       LDA STORHEND,X
+         STA HZEND,X
+         DEX
+         BPL :1
+         STZ BUFF       ;Set buffer to page boundary
+         LDA OCFLAG     ;Are we 0=closing or 1=opening?
+         BNE :2         ;Opening
+         LDA TEMPHI     ;Get address from previous window
+         STA BUFF+1     ;Save it
+         BRA :3
+:2       CLC            ;Calculate buffer start
+         LDA STREND+1   ;Get end of arrays
+         ADC FRETOP+1   ;Find free memory available
+         LSR            ;Divide by two
+         STA BUFF+1     ;Save start of buffer
+         STA TEMPHI
+:3       DEC HZSTRT     ;Correct positions
+         DEC VTSTRT
+         LDA VTSTRT     ;Get line of start
+         STA VSBOX      ;Save it somewhere else
+:4       JSR BASCALC    ;Calculate address of line
+         LDY HZSTRT     ;Get column of start
+:5       STY CH         ;Move to column of start
+         LDA OCFLAG     ;Are we 0=closing or 1=opening?
+         BNE :6         ;We are opening a window
+         LDY NUMCHRS    ;Index for buffer
+         LDA (BUFF),Y   ;Get character from buffer
+         BRA :7
+:6       JSR PICK       ;Get character from screen
+         LDY NUMCHRS    ;Index for buffer
+         STA (BUFF),Y   ;Save char on buffer
+         LDA #$A0       ;Clearing space
+:7       LDY CH         ;Get cursor position again
+         JSR STORE      ;Put character on screen
+         INC NUMCHRS
+         INY
+         CPY HZEND      ;Finished this line?
+         BNE :5
+         CLC
+         LDA BUFF       ;Update buffer location
+         ADC NUMCHRS
+         STA BUFF
+         BCC :8
+         INC BUFF+1
+:8       STZ NUMCHRS
+         INC VTSTRT     ;Increment screen line
+         LDA VTSTRT     ;Get new screen line
+         CMP VTEND      ;Are we finished with window?
+         BNE :4
+EXIT     LDA OCFLAG     ;Get opening/closing flag
+         STA WNDOWMEM   ;Change memory status
+         BNE :1
+         JMP RESTSCRN   ;Restore old screen
+:1       JSR SAVESCRN   ;Save current screen
+         JSR SETSCRN    ;Set new screen
+BOX      LDA VSBOX
+         JSR BASCALC
+         LDA #$4C
+         JSR DRAW
+         DEC HZEND
+SIDES    LDA VSBOX
+         CMP VTEND
+         BEQ BOTTOM
+         JSR BASCALC
+         LDA #$5A
+         LDY HZSTRT
+         JSR STORE
+         LDA #$5F
+         LDY HZEND
+         JSR STORE
+         INC VSBOX
+         BRA SIDES
+BOTTOM   DEC VTEND
+         INC HZSTRT
+         LDA VTEND
+         JSR BASCALC
+         LDA #$9F
+DRAW     LDY HZSTRT
+:1       JSR STORE
+         INY
+         CPY HZEND
+         BNE :1
+         RTS
+SETSCRN  LDA WNDOWMEM   ;Is a window open?
+         BEQ TOERROR    ;No, signal error
+         LDA STORVSTR   ;Get start line of window
+         STA $22
+         LDA STORVEND   ;Get end line of window
+         DEC
+         STA $23
+         LDA STORHSTR   ;Get start column of window
+         INC
+         STA $20
+         LDA STORHEND   ;Get end column of window
+         SEC
+         SBC STORHSTR
+         SBC #$03
+         STA $21
+         RTS
+TOERROR  JMP QUANTERR
+RESTORE  LDA WNDOWMEM   ;Is a window open?
+         BEQ TOERROR    ;No, so signal error
+         JMP RESTSCRN   ;Restore old screen
+
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+* Subroutines:
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+PICK     PHY            ;Save Y-reg
+         JSR MAIN_AUX   ;Set proper memory bank
+         LDA (BAS),Y    ;Get character from screen
+         PLY
+         RTS
+STORE    PHY            ;Save Y-reg
+         PHA            ;Save char to store
+         JSR MAIN_AUX   ;Set proper memory bank
+         PLA            ;Recover char to store
+         STA (BAS),Y    ;Put character on screen
+         PLY
+         RTS
+MAIN_AUX TYA            ;Move column to Acc
+         LSR            ;Divide by two
+         TAY
+         STZ $C055      ;Set auxiliary memory
+         BCC :1
+         STZ $C054      ;Set main memory
+:1       RTS
+SAVESCRN LDX #$03       ;Save current screen parameters
+:1       LDA $20,X
+         STA SCREEN,X
+         DEX
+         BPL :1
+         RTS
+RESTSCRN LDX #$03       ;Restore screen parameters
+:1       LDA SCREEN,X
+         STA $20,X
+         DEX
+         BPL :1
+         RTS
+WNDOWMEM HEX 00
+TEMPHI   HEX 00
+OCFLAG   HEX 00
+NUMCHRS  HEX 00
+VSBOX    HEX 00
+HZEND    HEX 00
+HZSTRT   HEX 00
+VTEND    HEX 00
+VTSTRT   HEX 00
+STORHEND HEX 00
+STORHSTR HEX 00
+STORVEND HEX 00
+STORVSTR HEX 00
+SCREEN   DFS 04
+CDEND    EQU *
+CDLEN    EQU CDEND-$800
+MVEND    EQU MVSTART+CDLEN

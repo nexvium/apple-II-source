@@ -1,0 +1,817 @@
+* Scramble 2.0
+* By Javier Alvarado
+* Copyright (C) 1992
+* Paragon Systems
+* May 3, 1992
+
+TEMP     EQU $00        ;Temporary storage (4 bytes)
+CH       EQU $24        ;Horizontal cursor position
+TIMER    EQU $4E        ;Cursor timer
+INBUFF   EQU $200       ;Input buffer
+BUFFPOS  EQU $2A00      ;Position in buffer
+MODE     EQU $2A01      ;Insert/overstrike flag
+LENGTH   EQU $2A02      ;Length of input
+CUR_CHAR EQU $2A03      ;Display cursor/char flag
+MAXLEN   EQU $2A04      ;Maximum length of input
+SVKEY    EQU $2A05      ;Temporary key storage
+MLI      EQU $BF00      ;Machine Language Interface
+KEYBOARD EQU $C000      ;Keyboard location
+STROBE   EQU $C010      ;Keyboard strobe location
+SPEAKER  EQU $C030      ;Speaker location
+OPEN_APL EQU $C061      ;Open-Apple flag
+CLSD_APL EQU $C062      ;Closed-Apple flag
+C3ROM    EQU $C300      ;80-column display
+TABV     EQU $FB5B      ;VTAB cursor
+HOME     EQU $FC58      ;Clear the screen
+WAIT     EQU $FCA8      ;Waste time
+CROUT    EQU $FD8E      ;Print a carriage return
+COUT     EQU $FDED      ;Print a character
+
+         ORG $2000
+
+         LDX #START
+         LDA #<START
+         STX $3F2
+         STA $3F3
+         JSR $FB6F
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+* MAIN PROGRAM:
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+START    LDA #$00       ;Non-printable character
+         JSR C3ROM      ;Turn on 80-column screen
+         JSR MLI        ;Close any open files
+         HEX CC
+         DA  CLOSPARM
+         JSR PRINT      ;Print screen setup
+         ASC "Disk: Disk 1 (Slot 6)          SCRAMBLE/"
+         ASC "UNSCRAMBLE                 Escape: Exit "
+         ASC "=====<====<====<====<====<====<====<===="
+         ASC "<====<====<====<====<====<====<====<===",00
+         LDA #22        ;Move to bottom of screen
+         JSR TABV
+         STZ CH
+         LDX #$00
+         LDA #$AD       ;Print a line of -'s
+:1       JSR COUT
+         INX
+         CPX #79        ;Are we done?
+         BNE :1         ;No, print one more
+         LDA #23        ;Print fake memory available
+         JSR TABV
+         LDA #68
+         STA CH
+         JSR PRINT
+         ASC "40K Avail.",00
+         STZ CH
+         JSR PRINT      ;Request password
+         ASC "Enter Password: ",00
+         STZ $280       ;Make sure there's nothing
+         LDA #$80       ;under the cursor
+         STA BUFFPOS
+         STZ MODE       ;Set insert mode
+:2       LDY #$00       ;Clear index
+:2A      JSR GET_KEY    ;Get a keypress
+         CMP #$FF       ;Was it Delete?
+         BEQ :2         ;Yes, start over
+         CMP #$8D       ;Was it Return?
+         BEQ :3         ;Yes, check password
+         CMP #$9B       ;Was it Esc?
+         BNE :2B        ;No, part of password
+         CLC            ;Signal clear screen
+         JMP EXIT       ;Exit program
+:2B      CMP #"a"       ;Is it lowercase?
+         BCC :3C
+         AND #$DF       ;Convert to uppercase
+:3C      STA INBUFF,Y   ;Put key in buffer
+         CPY #$7F       ;Is it the limit?
+         BCS :2A        ;Yes, don't move pointer
+         INY
+         BRA :2A        ;Do next key
+:3       JSR VERIFY
+         TYA
+         TAX
+         STZ INBUFF,X   ;Mark end
+         LDX #$00
+:3A      LDA INBUFF,X   ;Get char from typed password
+         EOR #$FF       ;Encode it
+         CMP PASSWORD,X ;Is it correct password?
+         BNE BAD_WORD   ;No!  The scum!
+         CMP #$FF       ;Was it end marker?
+         BEQ NEW_PATH   ;Yes, it's cool
+         INX            ;Do next character
+         BRA :3A
+BAD_WORD LDA #$00
+         JSR C3ROM      ;Clear screen
+         LDA #22
+         JSR TABV       ;Move to bottom of screen
+         JSR PRINT      ;Print message (in inverse)
+         ASC 'Incorrect password.     Access denied.  '
+         ASC '  Incorrect password.     Access denied.',00
+         LDX #$00       ;Clear counter
+:1       JSR CROUT      ;Print a carriage return
+         INX
+         CPX #22        ;Are we done?
+         BCC :1         ;No, do it again
+         LDA #2         ;Move to top of screen
+         JSR TABV
+         STZ CH
+         SEC            ;Signal don't clear screen
+         JMP EXIT       ;Exit Scramble
+NEW_PATH STZ INBUFF     ;Clear contents of buffer
+         LDA #45
+         STA MAXLEN     ;Set maximum length of path
+GET_PATH LDA #23        ;Move to bottom of screen
+         JSR TABV
+         STZ CH
+         JSR PRINT      ;Print pathname request
+         ASC "Pathname? ",00
+         LDX #50
+         JSR PRINTSPC   ;Print 50 spaces
+         JSR DISPBUFF   ;Display contents of buffer
+         BRA DO_FLASH   ;Get input
+DO_SOUND BIT SPEAKER    ;Toggle the speaker
+         LDA #$1B       ;Set length of wait (tone)
+         JSR WAIT       ;and waste that much time
+         BIT STROBE     ;Was the key released?
+         BMI DO_SOUND   ;No, continue with the sound
+DO_FLASH JSR GET_KEY    ;Get a key
+         BIT OPEN_APL   ;Check for Open-Apple
+         BMI DO_APL     ;Go handle Apple command
+         BIT CLSD_APL   ;Check for Closed-Apple
+         BPL ESC        ;Check for next command
+DO_APL   CMP #$88       ;Was it OA- <--?
+         BEQ :1         ;Yes, handle OA- <--
+         CMP #$95       ;Was it OA- -->?
+         BEQ :2
+         CMP #"<"       ;Was it OA-<?
+         BEQ :3
+         CMP #","
+         BEQ :3
+         CMP #">"       ;Was it OA->?
+         BEQ :4
+         CMP #"."
+         BEQ :4
+         CMP #"/"       ;Was it AO-question?
+         BEQ :5
+         CMP #"?"
+         BEQ :5
+         CMP #$9B       ;Was it Escape?
+         BEQ ESC
+         CMP #$FF       ;Was it OA-Delete?
+         BEQ :6
+         AND #$DF       ;Make sure it's upper case
+         CMP #"E"       ;Was it OA-E?
+         BEQ :7
+         CMP #"Y"       ;Was it OA-Y?
+         BEQ :8
+         CMP #"V"       ;Was it OA-V?
+         BEQ :9
+         BRA DO_SOUND   ;Apple command not recognized
+:1       JMP OA_LEFT    ;Move to previous name
+:2       JMP OA_RIGHT   ;Move to next name
+:3       JMP OA_<       ;Move to start of line
+:4       JMP OA_>       ;Move to end of line
+:5       JMP OA_?       ;Print name of disk in drive
+:6       JMP OA_DEL     ;Delete char under the cursor
+:7       JMP OA_E       ;Toggle insert/overstrike mode
+:8       JMP OA_Y       ;Clear to end of line
+:9       JMP DO_VOL     ;Scramble volume
+ESC      CMP #$9B       ;Is it [Esc]?
+         BNE DELETE     ;No check other keys
+         CLC            ;Signal clear screen
+         JMP EXIT       ;Exit Scramble
+DELETE   CMP #$FF       ;Is it [Delete]?
+         BNE RETURN     ;No, check next key
+         LDX BUFFPOS    ;Get the position in buffer
+         BNE :1
+         JMP DO_SOUND   ;If it's zero, signal error
+:1       LDA #$88       ;Print a backspace
+         JSR COUT
+         LDY #$00       ;Clear counter
+:2       LDA INBUFF,X   ;Get char at current position
+         BEQ :3         ;If at end, delete char
+         JSR COUT       ;Print character
+         INY            ;Add one to counter
+         STA INBUFF-1,X ;Move character back
+         INX            ;Get next character
+         BRA :2
+:3       DEX            ;One character back
+         DEC BUFFPOS
+         STZ INBUFF,X   ;Remove keypress from buffer
+         LDA #$A0
+         JSR COUT
+         LDA #$88
+         JSR COUT
+         DEC LENGTH
+         JSR BACKSPC    ;Move back
+         JMP DO_FLASH   ;Get next key
+RETURN   CMP #$8D       ;Is it [Return]?
+         BNE LEFTARR    ;No, go check another
+         LDA LENGTH
+         BNE :1
+         JMP DO_SOUND   ;Nothing in buffer
+:1       JMP MAKEPATH   ;Go build complete pathname
+LEFTARR  CMP #$88       ;Is it [<--]?
+         BNE RIGHTARR   ;No, go check another
+         LDX BUFFPOS    ;Check buffer position
+         BNE :1         ;If not zero, continue
+         JMP DO_SOUND   ;If it's zero, signal error
+:1       LDA #$88       ;Print a backspace
+         JSR COUT
+         DEC BUFFPOS    ;Save new position
+         JMP DO_FLASH   ;Go back
+RIGHTARR CMP #$95       ;Is it [-->]?
+         BNE SAVEKEY    ;No, check something else
+         LDX BUFFPOS    ;Get index
+         LDA INBUFF,X   ;Get chacter at current position
+         BNE :1         ;If not on end, continue
+         JMP DO_SOUND   ;Signal error
+:1       LDA INBUFF,X   ;Print character in buffer
+         JSR COUT
+         INC BUFFPOS    ;Move the cursor
+         JMP DO_FLASH
+SAVEKEY  STA SVKEY      ;Save key for future
+         CMP #"."       ;Is it a valid character?
+         BCC :NO_GOOD   ;No, ignore key
+         CMP #":"
+         BCC :OK
+         CMP #"A"
+         BCC :NO_GOOD
+         CMP #"["
+         BCC :OK
+         CMP #"a"
+         BCC :NO_GOOD
+         CMP #"{"
+         BCC :OK
+:NO_GOOD JMP DO_SOUND   ;Signal error
+:GO_BACK JMP DO_FLASH
+:OK      LDY #$FF       ;Initialize counter
+         LDX BUFFPOS    ;Get position in buffer
+         LDA MODE       ;Check for overstike cursor
+         BNE :A         ;If it is, go
+         LDA LENGTH     ;Get the length
+         CMP MAXLEN     ;Is it maximum length already?
+         BEQ :NO_GOOD   ;Yes, ignore key
+:LOOP    LDA SVKEY      ;Restore key
+         BEQ :RETURN    ;If it's zero, go finish up
+         JSR COUT       ;If it's not, print it
+         INY            ;Add one to counter
+         PHA            ;Save character
+         LDA INBUFF,X   ;Load and save char at
+         STA SVKEY      ;this position
+         PLA            ;Restore character
+         STA INBUFF,X   ;Save old char in new position
+         INX            ;Get ready for next character
+         BRA :LOOP      ;Repeat
+:RETURN  INC BUFFPOS    ;Move one over
+         STZ INBUFF,X   ;Mark new end
+         JSR BACKSPC    ;Move back to where we were
+         INC LENGTH     ;One more to the length
+         BRA :GO_BACK   ;Do next key
+:A       LDA INBUFF,X
+         BNE :A1        ;If it's not on end go
+         LDA LENGTH     ;Print and store character
+         CMP MAXLEN     ;Is it maximum length already?
+         BEQ :NO_GOOD   ;Ignore key
+         LDA SVKEY
+         JSR COUT       ;Print the character
+         STA INBUFF,X   ;If it is, save key
+         INX
+         INC BUFFPOS    ;Save new position
+         STZ INBUFF,X   ;Mark new end
+         INC LENGTH
+         BRA :GO_BACK
+:A1      LDA SVKEY      ;Restore character
+         JSR COUT
+         STA INBUFF,X
+         INX
+         INC BUFFPOS    ;Save new position
+         BRA :GO_BACK   ;Repeat
+OA_LEFT  LDY #$00       ;Clear counter
+         LDX BUFFPOS    ;Get position in buffer
+         BEQ :2         ;Nothing to do
+:1       DEX
+         INY
+         DEC BUFFPOS
+         BEQ :2         ;We're at start, so exit
+         LDA INBUFF,X   ;Get char at new position
+         CMP #"/"       ;Is it a slash?
+         BNE :1         ;No, try again
+:2       JSR BACKSPC
+         JMP DO_FLASH   ;Get next command
+OA_RIGHT LDX BUFFPOS    ;Get position in buffer
+         LDA INBUFF,X   ;Are we at end of input?
+         BEQ :2         ;Yes, so exit
+:1       INX
+         INC BUFFPOS
+         JSR COUT       ;Print char in previous position
+         LDA INBUFF,X   ;Get char at new position
+         BEQ :2         ;If zero, exit
+         CMP #"/"       ;Is it a slash?
+         BNE :1         ;No, try again
+:2       JMP DO_FLASH   ;Get next command
+OA_<     LDY BUFFPOS    ;Move to beginning of line
+         JSR BACKSPC
+         STZ BUFFPOS    ;Move to begginning of buffer
+         JMP DO_FLASH   ;Get next key
+OA_>     LDY BUFFPOS    ;Get current position
+:1       LDA INBUFF,Y   ;Get character from buffer
+         BEQ :2         ;If zero, we're done
+         JSR COUT       ;Print it
+         INY
+         BRA :1         ;Do it again
+:2       STY BUFFPOS    ;Save the new position
+         JMP DO_FLASH   ;Get next key
+OA_?     JSR MLI        ;Do ON_LINE call
+         HEX C5
+         DA  ONLN_PRM
+         BCC :1         ;Everything's cool
+         JMP MLI_ERR    ;Oh, darn
+:1       LDA #11        ;Move to center of screen
+         JSR TABV
+         LDA #32
+         STA CH
+         JSR DISP_VOL   ;Display volume name
+         JMP GET_PATH
+OA_DEL   LDX BUFFPOS    ;Get current buffer position
+         LDA INBUFF,X   ;Get char at this position
+         BEQ :1         ;If on end of input, exit
+         JSR COUT       ;Move one position forward
+         INC BUFFPOS
+         LDA #$FF       ;Exit using normal DELETE
+         JMP DELETE
+:1       JMP DO_FLASH
+OA_E     LDA #$FF
+         EOR MODE       ;Toggle the flag
+         STA MODE       ;Save the result
+         JMP DO_FLASH   ;Get next key
+OA_Y     LDX BUFFPOS    ;Get the current position
+         STZ INBUFF,X   ;Mark new end
+         LDA LENGTH     ;Get the length
+         SEC            ;Prepare for subtraction
+         SBC BUFFPOS
+         TAY            ;Move result to Y-reg
+         PHY            ;Save result
+         LDA #$A0       ;Space
+:1       DEY
+         BMI :2         ;We're done
+         JSR COUT       ;Print a space
+         BRA :1         ;Go do it again
+:2       PLY            ;Restore result
+         JSR BACKSPC    ;Go back to where we were
+         LDA BUFFPOS    ;Get current position
+         STA LENGTH     ;and save as new length
+         JMP DO_FLASH   ;Exit
+MAKEPATH LDA INBUFF     ;Is pathname in buffer complete?
+         CMP #"/"
+         BNE BUILD      ;No, so build pathname
+         LDA LENGTH     ;Move path to proper location
+         STA PATHNAME
+         LDX #$00
+:1       LDA INBUFF,X
+         BEQ LOADFILE
+         AND #$7F
+         STA PATHNAME+1,X
+         INX
+         BRA :1
+BUILD    JSR MLI        ;Do ON_LINE call
+         HEX C5
+         DA  ONLN_PRM
+         BCC :1
+         JMP MLI_ERR    ;We got an error
+:1       LDA $0280      ;Get length of volume name
+         AND #$0F
+         PHA
+         INC
+         INC
+         CLC
+         ADC LENGTH     ;Figure out new length
+         STA PATHNAME
+         LDA #'/'
+         STA PATHNAME+1
+         PLX
+         PHX
+:2       LDA $0280,X    ;Build pathname
+         STA PATHNAME+1,X
+         DEX
+         BNE :2
+         PLX
+         INX
+         INX
+         LDA #'/'
+         STA PATHNAME,X
+         INX
+         LDY #$00
+:3       LDA INBUFF,Y
+         BEQ LOADFILE
+         AND #$7F
+         STA PATHNAME,X
+         INY
+         INX
+         BRA :3
+LOADFILE LDA #11        ;Move to center of screen
+         JSR TABV
+         LDA #35
+         STA CH
+         JSR PRINT      ;Print status
+         HEX 9A         ;Control-Z (clear line)
+         ASC "Reading...",00
+         JSR MLI        ;Do OPEN call
+         HEX C8
+         DA  OPENPARM
+         BCC :1
+         JMP MLI_ERR    ;We have an error
+:1       JSR MLI        ;Do GET_EOF call
+         HEX D1
+         DA  EOFPARM
+         BCC :2
+         JMP MLI_ERR    ;Oh, no!
+:2       LDX EOF        ;Get the length
+         LDA EOF+1      ;and move it to the request count
+         STX REQUEST
+         STA REQUEST+1
+         JSR MLI        ;Do READ call
+         HEX CA
+         DA  READWRIT
+         BCC SCRMBL
+         JMP MLI_ERR    ;Oh, nuts!
+SCRMBL   LDA #11        ;Move to center of screen
+         JSR TABV
+         LDA #33
+         STA CH
+         JSR PRINT      ;Print status
+         HEX 9A         ;Control-Z (clear line)
+         ASC "Scrambling...",00
+         LDA #$30
+         STZ TEMP       ;Set start of scramble ($3000)
+         STA TEMP+1
+         LDX EOF        ;Add length of file to $3000
+         CLC            ;to find end address of data
+         ADC EOF+1
+         STX TEMP+2
+         STA TEMP+3
+         JSR SCRAMBLE   ;Scramble file contents
+SAVEFILE LDA #11        ;Move to center of screen
+         JSR TABV
+         LDA #35
+         STA CH
+         JSR PRINT      ;Print status
+         HEX 9A         ;Control-Z (clear line)
+         ASC "Writing...",00
+         JSR MLI        ;Do SET_MARK call
+         HEX CE
+         DA  SET_PARM
+         JSR MLI        ;Do WRITE call
+         HEX CB
+         DA  READWRIT
+         BCS MLI_ERR
+         JSR MLI        ;Do CLOSE call
+         HEX CC
+         DA  CLOSPARM
+         LDA #11
+         JSR TABV       ;Move to middle of screen
+         LDA #$9A       ;Print Control-Z
+         JSR COUT
+         JMP NEW_PATH
+MLI_ERR  STA TEMP+2     ;Save error code
+         JSR MLI        ;Close any open files
+         HEX CC
+         DA  CLOSPARM
+         LDA #11        ;Move to middle of screen
+         JSR TABV
+         LDA #10
+         STA CH
+         LDA #$9A       ;Print Control-Z to clear line
+         JSR COUT
+         LDA TEMP+2     ;Recover error code
+         LDX #$07
+:1       CMP ERRORS,X   ;Is it anticipated error?
+         BEQ :2         ;Yes, print its message
+         DEX
+         BPL :1         ;Check next error
+         JSR PRINT      ;Print error number
+         ASC "MLI error number $",00
+         LDX TEMP+2     ;Get error number
+         JSR $F944      ;Print code in hex
+         BRA :4
+:2       CMP #$27       ;Is it Input/Output error?
+         BEQ :3         ;Yes, don't print pathname
+         CMP #$2B       ;Write protect error?
+         BEQ :3
+         CMP #$52       ;Not a ProDOS disk?
+         BEQ :3
+         LDY #$00
+:2A      LDA INBUFF,Y   ;Print pathname in buffer
+         BEQ :3
+         JSR COUT
+         INY
+         BRA :2A
+:3       TXA            ;Move error number to Acc
+         ASL            ;Multiply by two
+         TAX            ;Move it back to X-reg
+         LDA ERRTABLE,X ;Get address of error message
+         STA TEMP
+         LDA ERRTABLE+1,X
+         STA TEMP+1
+         LDY #$00
+:3A      LDA (TEMP),Y    ;Print error message
+         BEQ :4
+         JSR COUT
+         INY
+         BRA :3A
+:4       JMP GET_PATH   ;Request pathname again
+DO_VOL   LDA LENGTH     ;Get length of input
+         BEQ :1
+         JMP DO_SOUND   ;Buffer must be empty
+:1       LDA #11        ;Move to center of screen
+         JSR TABV
+         LDA #25
+         STA CH
+         STZ $0280      ;Signal no volume read
+         STZ $027F      ;Signal scrambling
+         JSR MLI        ;Do ON_LINE call
+         HEX C5
+         DA  ONLN_PRM
+         JSR MLI        ;Do READ_BLOCK call
+         HEX 80
+         DA  RW_BLOCK
+         BCC *+3
+:E       JMP MLI_ERR    ;We got an error
+         LDA #$30
+         STZ TEMP       ;Set start of scramble ($3000)
+         STA TEMP+1
+         LDA #$32       ;Block is two pages long
+         STZ TEMP+2
+         STA TEMP+3
+         JSR SCRAMBLE   ;Scramble block (Directory)
+         JSR MLI        ;Do WRITE_BLOCK call
+         HEX 81
+         DA  RW_BLOCK
+         BCS :E         ;We got an error
+         LDA $0280      ;Had we read volume name?
+         AND #$0F
+         BNE :7         ;Yes, don't try do it again
+         DEC $027F      ;Signal volume unlocked
+         JSR MLI        ;Do ON_LINE call
+         HEX C5
+         DA  ONLN_PRM
+         BCC :7
+         JSR PRINT      ;Print non-ProDOS note
+         HEX 9A         ;Control-Z (clear line)
+         ASC "Disk scrambled was non-ProDOS",00
+         BRA :9
+:7       JSR DISP_VOL   ;Display volume name
+         JSR PRINT
+         ASC " is ",00
+         LDA $27F       ;Are we scrambling?
+         BNE :8
+         JSR PRINT
+         ASC "scrambled",00
+         BRA :9
+:8       JSR PRINT
+         ASC "unscrambled",00
+:9       LDA #23        ;Move to bottom of screen
+         JSR TABV
+         STZ CH
+         LDX #60        ;Clear line
+         JSR PRINTSPC
+         JSR PRINT
+         ASC "Press any key to continue.",00
+         JSR GET_KEY
+         LDA #11
+         JSR TABV       ;Move to middle of screen
+         LDA #$9A       ;Print Control-Z
+         JSR COUT
+         JMP NEW_PATH   ;Get next pathname
+EXIT     BCS :1         ;Don't clear screen
+         JSR HOME       ;Clear screen
+         JSR CROUT      ;Move one line down
+:1       LDX #$00
+         LDA #$BE
+         STX $3F2
+         STA $3F3
+         JSR $FB6F
+         LDX #$FF       ;Trick 65C02 into
+         LDA #$BD       ;returning to BASIC.SYSTEM
+         PHA
+         PHX
+         BIT OPEN_APL   ;Is Open Apple down?
+         BPL :2         ;No, erase program
+         BIT CLSD_APL   ;How about Closed Apple?
+         BPL :2         ;Not down either
+         RTS            ;Exit without erasing program
+:2       LDA #$20       ;Erase program from memory
+         STA $E6
+         BIT STROBE
+         LDX #$00
+         LDA #$BE
+         STX $3F2
+         STA $3F3
+         JSR $FB6F
+         JMP $F3F2      ;Exit
+
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+* SUBROUTINES:
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+GET_KEY  LDA #$00       ;This is to make sure that
+         STA TIMER      ;the cursor is displayed
+         LDA COUNTER+1  ;on entry
+         STA TIMER+1
+         STZ CUR_CHAR
+GETKEY   LDA TIMER      ;Time to increase high byte?
+         BNE CONT       ;No, so continue
+         LDA TIMER+1    ;Yes, check it
+COUNTER  CMP #$00       ;$00 is modified!
+         BEQ FLASH      ;Yes, go flash cursor
+         INC TIMER+1    ;No, increase
+         INC TIMER
+         BRA GETKEY
+CONT     INC TIMER      ;No so increase timer
+         LDA KEYBOARD   ;Was a key pressed?
+         BPL GETKEY     ;No, so repeat
+         BIT STROBE     ;Yes, so clear strobe
+         PHA            ;Save key pressed
+         LDX BUFFPOS
+         LDA INBUFF,X   ;Get char at current location
+         BNE :A         ;If it's not zero, skip this
+         LDA #$A0       ;If it is, get a space
+:A       JSR COUT       ;Print character
+         LDA #$88       ;Print a backspace
+         JSR COUT
+         PLA            ;Put key back in Acc
+         RTS            ;Return to caller
+FLASH    LDA CUR_CHAR   ;Display cursor or character?
+         BEQ DOCURSOR   ;Go display cursor
+         LDX BUFFPOS    ;Get position in buffer
+         LDA INBUFF,X   ;Get chacter there
+         BNE DO_CHAR    ;If it's not a zero, print char
+         LDA #$A0       ;If a zero, print a space
+DO_CHAR  JSR COUT       ;Print it
+         LDA #$60       ;Modify counter
+         STA COUNTER+1
+         LDA #$88       ;Print backspace
+         JSR COUT
+         STZ CUR_CHAR   ;Next time print cursor
+         STZ TIMER      ;Clear the timer
+         STZ TIMER+1
+         JMP GETKEY
+DOCURSOR LDA MODE       ;Which cursor?
+         BEQ INSERT     ;If it's zero, do insert cursor
+         LDX BUFFPOS    ;Get position in buffer
+         LDA INBUFF,X   ;Get character in position
+         BNE :1         ;If not on end, go
+         LDA #$20       ;Cursor is inverse space
+         BRA PRT_CUR
+:1       SEC            ;Prepare for subtraction
+         SBC #$80       ;Make char inverse
+         BRA PRT_CUR
+INSERT   LDA #"_"       ;Cursor is underline
+PRT_CUR  JSR COUT       ;Print the cursor
+         LDA #$30       ;Modify counter
+         STA COUNTER+1
+         LDA #$88       ;Print backspace
+         JSR COUT
+         STA CUR_CHAR   ;Next time print letter
+         STZ TIMER      ;Clear timer
+         STZ TIMER+1
+         JMP GETKEY
+BACKSPC  LDA #$88       ;Backspace char
+         INY
+:1       DEY
+         BEQ :2         ;If minus, we're done
+         JSR COUT       ;Print backspace
+         BRA :1         ;Do next
+:2       RTS            ;Return
+SCRAMBLE LDX #$00
+:1       LDA PASSWORD,X ;Get char from password
+         EOR (TEMP)     ;Use it to encode byte of data
+         STA (TEMP)     ;Put encoded byte in data
+         INC TEMP       ;Point to next byte of data
+         BNE :2
+         INC TEMP+1
+:2       LDA TEMP+1     ;Are we done with scramble?
+         CMP TEMP+3
+         BNE :3         ;No, so continue
+         LDA TEMP
+         CMP TEMP+2
+         BEQ :4         ;Encoding is done
+:3       INX
+         CPX #$XX       ;Have we gone through password? (Length redacted - 2024/06/05)
+         BCC :1         ;No, continue
+         BRA SCRAMBLE   ;Yes, start with first letter again
+:4       RTS
+PRINT    PLA            ;Get low byte of address
+         STA TEMP       ;Save it
+         PLA            ;Get high byte
+         STA TEMP+1     ;Save the address
+:1       INC TEMP
+         BNE :2
+         INC TEMP+1
+:2       LDA (TEMP)     ;Get char from string
+         BEQ :3         ;If zero, go end
+         JSR COUT       ;Print the character
+         BRA :1         ;Do next char
+:3       LDA TEMP+1     ;Get HOB of address
+         PHA            ;Save it on stack
+         LDA TEMP       ;Get LOB of address
+         PHA            ;Save it on stack
+         RTS            ;Return past text
+PRINTSPC LDA #$A0       ;Space char
+         PHX            ;Save number of spaces
+:1       JSR COUT       ;Print space
+         DEX
+         BNE :1         ;If not done, print another one
+         PLY            ;Put number of spaces in Y-reg
+         JMP BACKSPC    ;Get back to origin
+DISPBUFF LDX #$00
+:1       LDA INBUFF,X   ;Get char from buffer
+         BEQ :2         ;If zero, we're done
+         JSR COUT       ;Print char
+         INX
+         BRA :1
+:2       STX BUFFPOS
+         STX LENGTH
+         RTS
+DISP_VOL LDA #$9A       ;Clear line first (Ctrl-Z)
+         JSR COUT
+         LDA #"/"       ;Print first slash
+         JSR COUT
+         LDA $0280      ;Get drive, slot, and length
+         AND #$0F       ;Isolate length
+         BEQ :2         ;No name in buffer
+         STA $0280      ;Put the length by itself
+         LDX #$01
+:1       LDA $0280,X    ;Get char from volume name
+         ORA #$80       ;Turn hight bit on
+         JSR COUT       ;Print it
+         CPX $0280      ;Are we done?
+         BEQ :2         ;Yes, we are
+         INX
+         BRA :1         ;Do next character
+:2       RTS
+VERIFY   STZ CH
+         JSR PRINT
+         ASC "Verifying...   ",00
+         LDA #$10
+:1       PHA
+         LDA #$FF
+:2       DEC
+         BNE :2
+         PLA
+         DEC
+         BNE :1
+         RTS
+
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+* DATA:
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+PASSWORD HEX XX,XX,...,FF               ; (Password redacted - 2024/06/05)
+
+ERRORS   HEX 27,2B,40,44,45,46,4E,52
+ERRTABLE DA  IOERROR
+         DA  PROTECTD
+         DA  SYNTAX
+         DA  NOTFOUND
+         DA  NOTFOUND
+         DA  NOTFOUND
+         DA  LOCKED
+         DA  NOPRODOS
+IOERROR  ASC "Input/Output error.  Check disk and drive",00
+PROTECTD ASC "Disk is write protected",00
+SYNTAX   ASC " is not a valid pathname",00
+NOTFOUND ASC " does not exist",00
+LOCKED   ASC " is locked",00
+NOPRODOS ASC "Disk is not a ProDOS disk",00
+
+ONLN_PRM HEX 02         ;ON_LINE parameter list
+         HEX 60         ;Drive 1 (Slot 6)
+         HEX 80,02      ;Put volume name  at $0280
+
+RW_BLOCK HEX 03         ;READ/WRITE_BLOCK parm
+         HEX 60         ;Drive 1 (Slot 6)
+         HEX 00,30      ;Put it at $3000
+         HEX 02,00      ;Read/write block $0002
+
+OPENPARM HEX 03         ;Parameter count
+         DA  PATHNAME   ;Address of pathname
+         HEX 00,2B      ;Address of buffer ($2B00)
+         HEX 00         ;Reference number
+
+EOFPARM  HEX 02         ;Parameter count
+         HEX 01
+EOF      HEX 00,00,00   ;EOF (length of file)
+
+READWRIT HEX 04         ;Parameter count
+         HEX 01
+         HEX 00,30      ;Loading address ($3000)
+REQUEST  HEX 00,00      ;Number of bytes to read
+         HEX 00,00
+
+SET_PARM HEX 02         ;SET_MARK parameter count
+         HEX 01
+         HEX 00,00,00   ;Set to start of file
+
+CLOSPARM HEX 01         ;Parameter count
+         HEX 00         ;All files
+
+PATHNAME EQU *

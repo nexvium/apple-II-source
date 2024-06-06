@@ -1,0 +1,559 @@
+* InputPro 5.4
+* By Javier Alvarado
+* Copyright (C) 1992
+* Paragon Systems
+* April 18, 1992
+
+MAXLEN   EQU $00        ;Maximum length of input
+TEMPTR   EQU $01        ;Temporary pointer
+VARPTR   EQU $03        ;Variable pointer
+CHARAC   EQU $0D
+ENDCHR   EQU $0E
+VALTYP   EQU $11        ;Variable type
+TIMER    EQU $4E        ;Timer storage
+FORPNT   EQU $85
+CHRGET   EQU $B1        ;Advance TXTPTR and get char
+CHRGOT   EQU $B7        ;Get char at TXTPTR
+TXTPTR   EQU $B8        ;Text pointer
+INBUFF   EQU $0200      ;Input buffer
+ERROUT   EQU $BE09      ;Print BASIC.SYSTEM error
+GETBUFR  EQU $BEF5      ;Get buffer space
+FREBUFR  EQU $BEF8      ;Release all buffer space
+KEYBOARD EQU $C000      ;Keyboard location
+STROBE   EQU $C010      ;Keyboard strobe
+FRMWRON  EQU $C01E      ;80-column firmware flag
+SPEAKER  EQU $C030      ;Speaker location
+OPN_APL  EQU $C061      ;Open Apple location
+CLSD_APL EQU $C062      ;Closed Apple location
+ERROR    EQU $D412      ;Print an Applesoft error
+LET2     EQU $DA7B
+PTRGET   EQU $DFE3      ;Get pointer to variable
+STRLT2   EQU $E3ED
+TXTLIT   EQU $E73D
+WAIT     EQU $FCA8      ;Waste time
+CROUT    EQU $FD8E      ;Output a carriage return
+COUT     EQU $FDED      ;Output a character
+
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+* InpurPro Setup:
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+         ORG $6000
+
+START    LDA DEST+1     ;Check destination address
+         CMP #$96
+         BEQ DEFAULT    ;Use default of program
+         BCS ERR        ;Can't be higher than $9600
+         BRA RELOCATE
+ERR      LDA #$0C       ;NO BUFFERS AVAILABLE
+         JMP ERROUT     ;Print it and exit
+DEFAULT  LDA #$04       ;We need four pages
+         JSR GETBUFR    ;Get them
+         BCS ERR        ;We got a problem here
+         STA DEST+1
+RELOCATE LDX #MVSTART   ;Get address of code
+         LDA #<MVSTART
+         STX $3A
+         STA $3B
+         LDA DEST+1     ;Get destination address
+         SEC
+         SBC #$08
+         STA $4E        ;Save offset
+         LDY #$00       ;Clear index
+:1       LDA ($3A),Y    ;Get Op Code from program
+         JSR $FD5D      ;Find info about Op Code
+         LDA $2F        ;Put length in Acc
+         CMP #$03       ;Is it three bytes long?
+         BEQ :4         ;Yes, relocate it
+:2       CLC            ;Point to next byte
+         ADC $3A
+         STA $3A
+         BCC :3
+         INC $3B
+:3       LDA $3B        ;Get page of location
+         CMP #<MVEND    ;Is it the end?
+         BNE :1         ;No, do next command
+         LDA $3A
+         CMP #MVEND
+         BNE :1
+         BRA MOVE       ;Relocation's done
+:4       INY            ;Point to high byte of address
+         INY
+         LDA ($3A),Y
+         CMP #<CHK_OURS ;Is address within program?
+         BCC :5         ;No, don't relocate
+         CMP #<CDEND+$100
+         BCS :5
+         CLC            ;Relocate command
+         ADC $4E
+         STA ($3A),Y    ;Put it back in program
+:5       LDY #$00       ;Clear index again
+         LDA #$03       ;Set length again
+         BRA :2         ;Advance pointer
+MOVE     LDX $3F6       ;Save current amper vector
+         LDA $3F7
+         STX MVSTART+1
+         STA MVSTART+2
+         LDX #MVSTART   ;Set start address
+         LDA #<MVSTART
+         STX $3C
+         STA $3D
+         LDX #MVEND     ;Set end address
+         LDA #<MVEND
+         STX $3E
+         STA $3F
+         LDX #$00       ;Set destination address
+DEST     LDA #$96
+         STX $42
+         STA $43
+         JSR $FE2C      ;Move routine
+         LDA #$4C       ;Set up amper vector
+         STA $3F5
+         LDX #$03
+         LDA DEST+1
+         STX $3F6
+         STA $3F7
+         LDA #$FF       ;Set MAXLEN to 255
+         STA MAXLEN
+         RTS            ;Return to BASIC
+MVSTART  EQU *
+
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+* InputPro Main Program:
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+         ORG $0800      ;For relocation purposes
+
+NOTOURS  JMP $0000      ;Check any other routines
+CHK_OURS STZ INP_REST   ;Assume INPUT command
+         CMP #$80       ;Is it END?
+         BNE CHK_IN     ;No, check for INPUT
+         JMP END        ;Yes, go to END routine
+CHK_IN   CMP #$84       ;Is it INPUT?
+         BEQ INPUT      ;Yes, goto INPUT routine
+         CMP #$AE       ;Is it restore?
+         BNE CHK_GET    ;No, check for GET commands
+         JMP RESTORE    ;Yes, goto RESTORE routine
+CHK_GET  CMP #$BE       ;Is it GET?
+         BNE NOTOURS    ;Not our command
+         JMP GET        ;Execute it
+INPUT    JSR SETUP      ;Get ready
+         BRA DO_FLASH   ;Go get a key
+DO_SOUND BIT SPEAKER    ;Toggle the speaker
+         LDA #$1B       ;Set length of wait (tone)
+         JSR WAIT       ;and waste that much time
+         BIT STROBE     ;Was the bad key released?
+         BMI DO_SOUND   ;No, continue with the sound
+DO_FLASH JSR GET_KEY    ;Get a key
+         BIT OPN_APL    ;Check for Open-Apple
+         BMI DO_APL     ;Go handle Apple command
+         BIT CLSD_APL   ;Check for Closed-Apple
+         BPL ESC        ;Check for next command
+DO_APL   CMP #$88       ;Was it OA- <--?
+         BEQ :1         ;Yes, handle OA- <--
+         CMP #$95       ;Was it OA- -->?
+         BEQ :2
+         CMP #"<"       ;Was it OA-<?
+         BEQ :3
+         CMP #","
+         BEQ :3
+         CMP #">"       ;Was it OA->?
+         BEQ :4
+         CMP #"."
+         BEQ :4
+         CMP #$FF       ;Was it OA-Delete?
+         BEQ :5
+         AND #$DF       ;Make sure it's upper case
+         CMP #"E"       ;Was it OA-E?
+         BEQ :6
+         CMP #"Y"       ;Was it OA-Y?
+         BEQ :7
+         BRA DO_SOUND   ;Apple command not recognized
+:1       JMP OA_LEFT
+:2       JMP OA_RIGHT
+:3       JMP OA_<
+:4       JMP OA_>
+:5       JMP OA_DEL
+:6       JMP OA_E
+:7       JMP OA_Y
+ESC      CMP #$9B       ;Is it [Esc]?
+         BNE DELETE     ;No check other keys
+         STA INBUFF     ;Put escape in buffer
+         STZ INBUFF+1
+         BRA BASIC_GO   ;Go build string
+DELETE   CMP #$FF       ;Is it [Delete]?
+         BNE RETURN     ;No, check next key
+         LDX BUFFPOS    ;Get the position in buffer
+         BNE :1
+         JMP DO_SOUND   ;If it's zero, signal error
+:1       LDA #$88       ;Print a backspace
+         JSR COUT
+         LDY #$00       ;Clear counter
+:2       LDA INBUFF,X   ;Get char at current position
+         BEQ :3         ;If at end, delete char
+         JSR COUT       ;Print character
+         INY            ;Add one to counter
+         STA INBUFF-1,X ;Move character back
+         INX            ;Get next character
+         BRA :2
+:3       DEX            ;One character back
+         DEC BUFFPOS
+         STZ INBUFF,X   ;Remove keypress from buffer
+         LDA #$A0
+         JSR COUT
+         LDA #$88
+         JSR COUT
+         DEC LENGTH
+         JSR BACKSPC    ;Move back
+         JMP DO_FLASH   ;Get next key
+RETURN   CMP #$8D       ;Is it [Return]?
+         BNE LEFTARR    ;No, go check another
+         BIT INP_REST   ;Are we doing RESTORE?
+         BMI BASIC_GO   ;Yes, don't print carriage
+         JSR CROUT      ;Print carriage return
+BASIC_GO LDX #$00
+:1       LDA INBUFF,X   ;Make sure string has
+         BEQ :2         ;it's high bit off
+         AND #$7F
+         STA INBUFF,X
+         INX
+         BRA :1
+:2       STZ CHARAC     ;Make sure that STRL2 will only
+         STZ ENDCHR     ;stop on an end of line char (0)
+         LDA #INBUFF    ;Get address of buffer
+         LDY #<INBUFF
+         JSR STRLT2     ;Build discription for string
+         JSR TXTLIT     ;Set up pointer for LET
+         JSR LET2       ;and save variable
+         LDA TEMPTR     ;Then restore TXTPTR
+         LDY TEMPTR+1
+         STA TXTPTR
+         STY TXTPTR+1
+         RTS            ;Return to calling program
+LEFTARR  CMP #$88       ;Is it [<--]?
+         BNE RIGHTARR   ;No, go check another
+         LDX BUFFPOS    ;Check buffer position
+         BNE :1         ;If not zero, continue
+         JMP DO_SOUND   ;If it's zero, signal error
+:1       LDA #$88       ;Print a backspace
+         JSR COUT
+         DEC BUFFPOS    ;Save new position
+         JMP DO_FLASH   ;Go back
+RIGHTARR CMP #$95       ;Is it [-->]?
+         BNE SAVEKEY    ;No, check something else
+         LDX BUFFPOS    ;Get index
+         LDA INBUFF,X   ;Get chacter at current position
+         BNE :1         ;If not on end, continue
+         JMP DO_SOUND   ;Signal error
+:1       LDA INBUFF,X   ;Print character in buffer
+         JSR COUT
+         INC BUFFPOS    ;Move the cursor
+         JMP DO_FLASH
+SAVEKEY  STA SVKEY      ;Save key for futures
+         CMP #$A0       ;Is it control character
+         BCS :OK        ;No continue
+:NO_GOOD JMP DO_SOUND   ;Signal error
+:GO_BACK JMP DO_FLASH   ;Yes, ignore
+:OK      LDY #$FF       ;Initialize counter
+         LDX BUFFPOS    ;Get position in buffer
+         LDA MODE       ;Check for overstike cursor
+         BNE :A         ;If it is, go
+         LDA LENGTH     ;Get the length
+         CMP MAXLEN     ;Is it maximum length already?
+         BEQ :NO_GOOD   ;Yes, ignore key
+:LOOP    LDA SVKEY      ;Restore key
+         BEQ :RETURN    ;If it's zero, go finish up
+         JSR COUT       ;If it's not, print it
+         INY            ;Add one to counter
+         PHA            ;Save character
+         LDA INBUFF,X   ;Load and save char at
+         STA SVKEY      ;this position
+         PLA            ;Restore character
+         STA INBUFF,X   ;Save old char in new position
+         INX            ;Get ready for next character
+         BRA :LOOP      ;Repeat
+:RETURN  INC BUFFPOS    ;Move one over
+         STZ INBUFF,X   ;Mark new end
+         JSR BACKSPC    ;Move back to where we were
+         INC LENGTH     ;One more to the length
+         BRA :GO_BACK   ;Do next key
+:A       LDA INBUFF,X
+         BNE :A1        ;If it's not on end go
+         LDA LENGTH     ;Print and store character
+         CMP MAXLEN     ;Is it maximum length already?
+         BEQ :NO_GOOD   ;Ignore key
+         LDA SVKEY
+         JSR COUT       ;Print the character
+         STA INBUFF,X   ;If it is, save key
+         INX
+         INC BUFFPOS    ;Save new position
+         STZ INBUFF,X   ;Mark new end
+         INC LENGTH
+         BRA :GO_BACK
+:A1      LDA SVKEY      ;Restore character
+         JSR COUT
+         STA INBUFF,X
+         INX
+         INC BUFFPOS    ;Save new position
+         BRA :GO_BACK   ;Repeat
+OA_LEFT  LDY #$00       ;Clear counter
+         LDX BUFFPOS    ;Get position in buffer
+         BEQ :3         ;Nothing to do
+:1       DEX
+:2       INY
+         DEC BUFFPOS
+         BEQ :3         ;We're at start, so exit
+         LDA INBUFF,X   ;Get char at new position
+         CMP #$A0       ;Is it a space?
+         BEQ :1         ;Yes, it's a space
+         DEX
+         LDA INBUFF,X   ;Get char at new position
+         CMP #$A0       ;Is it a space?
+         BNE :2         ;No, try again
+:3       JSR BACKSPC
+         JMP DO_FLASH   ;Get next command
+OA_RIGHT LDX BUFFPOS    ;Get position in buffer
+         LDA INBUFF,X   ;Are we at end of input?
+         BEQ :3         ;Yes, so exit
+:1       INX
+:2       INC BUFFPOS
+         JSR COUT       ;Print char in previous position
+         LDA INBUFF,X   ;Get char at new position
+         BEQ :3         ;If zero, exit
+         CMP #$A0       ;Is it a space?
+         BNE :1         ;No, try again
+         INX
+         LDA INBUFF,X   ;Get char after space
+         CMP #$A0       ;Is it another space?
+         BEQ :2         ;Yes, try again
+         INC BUFFPOS    ;Point BUFFPOS to start of word
+         LDA #$A0       ;Print a space
+         JSR COUT
+:3       JMP DO_FLASH   ;Get next command
+OA_<     LDY BUFFPOS    ;Move to beginning of line
+         JSR BACKSPC
+         STZ BUFFPOS    ;Move to begginning of buffer
+         JMP DO_FLASH   ;Get next key
+OA_>     LDY BUFFPOS    ;Get current position
+:1       LDA INBUFF,Y   ;Get character from buffer
+         BEQ :2         ;If zero, we're done
+         JSR COUT       ;Print it
+         INY
+         BRA :1         ;Do it again
+:2       STY BUFFPOS    ;Save the new position
+         JMP DO_FLASH   ;Get next key
+OA_DEL   LDX BUFFPOS    ;Get current buffer position
+         LDA INBUFF,X   ;Get char at this position
+         BEQ :1         ;If on end of input, exit
+         JSR COUT       ;Move one position forward
+         INC BUFFPOS
+         LDA #$FF       ;Exit using normal DELETE
+         JMP DELETE
+:1       JMP DO_FLASH
+OA_E     LDA #$FF
+         EOR MODE       ;Toggle the flag
+         STA MODE       ;Save the result
+         JMP DO_FLASH   ;Get next key
+OA_Y     LDX BUFFPOS    ;Get the current position
+         STZ INBUFF,X   ;Mark new end
+         LDA LENGTH     ;Get the length
+         SEC            ;Prepare for subtraction
+         SBC BUFFPOS
+         TAY            ;Move result to Y-reg
+         PHY            ;Save result
+         LDA #$A0       ;Space
+         INY
+:1       DEY
+         BEQ :2         ;We're done
+         JSR COUT       ;Print a space
+         BRA :1         ;Go do it again
+:2       PLY            ;Restore result
+         JSR BACKSPC    ;Go back to where we were
+         LDA BUFFPOS    ;Get current position
+         STA LENGTH     ;and save as new length
+         JMP DO_FLASH   ;Exit
+RESTORE  JSR SETUP      ;Get ready
+         LDA (FORPNT)   ;Get length of string
+         BEQ :4         ;If length is zero, forget it!
+:1       STA SVKEY      ;Save length temporarily
+         LDY #$01       ;Get index ready
+         LDA (FORPNT),Y ;Get low byte of address
+         STA VARPTR     ;Save low byte
+         INY            ;Get ready for high byte
+         LDA (FORPNT),Y ;Get the high byte
+         STA VARPTR+1   ;Save the high byte
+         LDY #$00       ;Clear indexes
+         LDX #$00
+:2       LDA (VARPTR),Y ;Get a character
+         ORA #$80       ;Turn on the high bit
+         CMP #$A0       ;Filter out control chars
+         BCC :3
+         STA INBUFF,X   ;Put it in the buffer
+         INX            ;Increase index
+:3       INY            ;Get ready for next
+         CPY SVKEY      ;Did we get all of it?
+         BCC :2         ;No, get next char
+         STZ INBUFF,X   ;Mark new end
+         DEX
+         CPX MAXLEN
+         BCS :5
+         INX
+         STX LENGTH     ;Save length of input
+         STX BUFFPOS    ;Save buffer position
+         LDX #$00       ;Clear index
+:3A      LDA INBUFF,X   ;Get char from buffer
+         BEQ :4         ;We're done
+         JSR COUT       ;Print it
+         INX
+         BRA :3A
+:4       DEC INP_REST   ;Signal RESTORE command
+         JMP DO_FLASH   ;Jump to INPUT routine
+:5       LDX #$B0       ;Print STRING TOO LONG
+         JMP ERROR      ;and return to BASIC
+GET      JSR SETUP      ;Get ready
+         JSR CHRGOT     ;Get char after variable
+         CMP #','       ;Is it a comma?
+         BNE :3A
+         JSR CHRGET     ;Get char after comma
+         PHA            ;Save contents
+         JSR CHRGET
+         LDX TXTPTR     ;Copy new text pointer
+         LDA TXTPTR+1
+         STX TEMPTR
+         STA TEMPTR+1
+         PLA            ;Restore command
+         CMP #'W'       ;Wait without cursor?
+         BEQ :1         ;Yes, go do it
+         CMP #'P'       ;Peek for key already there?
+         BEQ :2
+         CMP #'R'       ;Restore variable contents?
+         BEQ :3
+         LDX #$10       ;Error number
+         JMP ERROR      ;Print SYNTAX ERROR
+:1       BIT STROBE     ;Clear the strobe
+:1A      LDA KEYBOARD   ;Has a key been pressed?
+         BPL :1A        ;No, check again
+         BIT STROBE     ;Yes, so clear the strobe
+         BRA :DONE      ;Finish up
+:2       LDA KEYBOARD   ;Get key already there
+         BMI :DONE
+         LDA #$00       ;If no key, say so
+         BRA :DONE
+:3       LDA (FORPNT)   ;Get length of string
+         BEQ :3A        ;If zero, don't get char
+         LDY #$01       ;Skip byte zero (length)
+         LDA (FORPNT),Y ;Get address of string
+         STA VARPTR
+         INY
+         LDA (FORPNT),Y
+         STA VARPTR+1
+         LDA (VARPTR)   ;Get first char of string there
+         ORA #$80       ;Turn it's high bit on
+         CMP #$A0       ;Is it a control character?
+         BCC :3A        ;Yes, don't use it
+         STA INBUFF     ;Put it in the buffer
+:3A      JSR GET_KEY    ;Get one keypress
+:DONE    STA INBUFF     ;Store it in the buffer
+         STZ INBUFF+1   ;Mark the end
+         JMP BASIC_GO   ;Build string and return
+END      LDX #$03       ;Set vector to point to
+         LDA #$BE       ;BASIC.SYSTEM command
+         STX $3F6       ;handler routine (DOSCMD)
+         STA $3F7
+         JSR CHRGET     ;Increase TXTPTR
+         JMP FREBUFR    ;Release the space
+
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+* InputPro Subroutines:
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+GET_KEY  LDA #$01       ;Make sure to print cursor
+         STA TIMER      ;first when routine
+         STA TIMER+1    ;is called
+         STZ CUR_CHAR
+         STZ STROBE
+GETKEY   DEC TIMER
+         BNE :1
+         DEC TIMER+1
+         BEQ FLASH
+:1       LDA KEYBOARD   ;Was a key pressed?
+         BPL GETKEY     ;No, so repeat
+         PHA            ;Save the key
+         LDX BUFFPOS
+         LDA INBUFF,X
+         BNE :2
+         LDA #$A0
+:2       JSR COUT
+         LDA #$88
+         JSR COUT
+         BIT STROBE     ;Yes, so clear strobe
+         PLA            ;Restore key
+         RTS            ;Return to caller
+FLASH    LDA CUR_CHAR   ;Display cursor or character?
+         BEQ DOCURSOR   ;Go display cursor
+         LDX BUFFPOS    ;Get position in buffer
+         LDA INBUFF,X   ;Get character there
+         BNE :1         ;If it's not a zero, print char
+         LDA #$A0       ;If a zero, print a space
+:1       JSR COUT
+         LDA #$88
+         JSR COUT
+         LDA #$50       ;Modify counter
+         STZ TIMER      ;Clear the timer
+         STA TIMER+1
+         STZ CUR_CHAR   ;Next time print cursor
+         JMP GETKEY
+DOCURSOR LDA MODE       ;Which cursor?
+         BEQ :2         ;If it's zero, do insert cursor
+         LDX FRMWRON    ;Is 80-col firmware on?
+         BPL :1         ;If not on, skip ahead
+         LDX BUFFPOS    ;Get position in buffer
+         LDA INBUFF,X   ;Get character in position
+         BNE *+2        ;If not on end, go
+:1       LDA #$A0       ;Cursor is inverse space
+         AND #$7F
+         BRA *+2
+:2       LDA #"_"       ;Cursor is underline
+         JSR COUT       ;Print the cursor
+         LDA #$88       ;Print backspace
+         JSR COUT
+         LDA #$40       ;Modify counter
+         STZ TIMER      ;Clear timer
+         STA TIMER+1
+         DEC CUR_CHAR   ;Next time print letter
+         JMP GETKEY
+SETUP    JSR CHRGET     ;Get TXTPTR past command
+         JSR PTRGET     ;Get pointer to variable
+         LDX VALTYP     ;Is it a string variable?
+         BNE :1         ;Yes, so continue
+         PLA            ;Remove return address
+         PLA            ;from stack
+         LDX #$A3       ;No, so print TYPE MISMATCH
+         JMP ERROR      ; ERROR and exit
+:1       STA FORPNT     ;Save pointer to variable
+         STY FORPNT+1
+         LDA TXTPTR     ;Save current text
+         LDY TXTPTR+1   ;pointer too
+         STA TEMPTR
+         STY TEMPTR+1
+         STZ INBUFF     ;Initialize locations
+         STZ BUFFPOS
+         STZ LENGTH
+         RTS
+BACKSPC  LDA #$88       ;Backspace char
+         INY
+:1       DEY
+         BEQ :2         ;If minus, we're done
+         JSR COUT       ;Print backspace
+         BRA :1         ;Do next
+:2       RTS            ;Return
+
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+* InputPro Data Storage:
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+BUFFPOS  HEX 00
+MODE     HEX 00
+LENGTH   HEX 00
+CUR_CHAR HEX 00
+SVKEY    HEX 00
+INP_REST HEX 00
+CDEND    EQU *
+CDLEN    EQU SVKEY-$0800
+MVEND    EQU MVSTART+CDLEN
