@@ -1,0 +1,669 @@
+* ASMPRO.SYSTEM
+* By Javier Alvarado
+* Copyright (C) 1992
+* Quantum
+* January 13, 1992
+
+         ORG $2000
+
+TEMP     EQU $00        ;Temporary storage
+MONTH    EQU $02        ;Month storage
+DAY      EQU $03        ;Day storage
+YEAR     EQU $04        ;Year storage
+CH       EQU $24        ;Horizontal cursor position
+TIMER    EQU $4E        ;Cursor timer
+INBUFF   EQU $200       ;Input buffer
+BUFFPOS  EQU $300       ;Position in buffer
+CURSOR   EQU $301       ;Insert/overstrike cursor flag
+CUR_DISP EQU $302       ;Display cursor/character flag
+PRT_CNTR EQU $303       ;Print counter
+SVKEY    EQU $304       ;Saved key
+LENGTH   EQU $305       ;Length of input
+MAXLEN   EQU $306       ;Maximun length of input
+MLI      EQU $BF00      ;Machine Language Interface
+DATE     EQU $BF90      ;ProDOS date registers
+KEYBOARD EQU $C000      ;Keyboard location
+STROBE   EQU $C010      ;Keyboard strobe location
+OPN_APL  EQU $C061      ;Open-Apple flag
+CLSD_APL EQU $C062      ;Closed-Apple flag
+C3ROM    EQU $C300      ;80-column display
+LINPRT1  EQU $EBA0      ;Hex to unsigned dec in FAC
+FOUT     EQU $ED34      ;FAC to decimal string in RAM
+TABV     EQU $FB5B      ;VTAB cursor
+HOME     EQU $FC58      ;Clear the scree
+CLREOL   EQU $FC9C      ;Clear to end of line
+CROUT    EQU $FD8E      ;Print a carriage return
+COUT     EQU $FDED      ;Print a character
+BELL     EQU $FF3A      ;Ring the bell
+
+*============================
+* INITIALIZE SCREEN:
+*============================
+
+         LDA #<START    ;Set Reset vector to
+         LDX #START     ;start of program
+         STA $3F3
+         STX $3F2
+         JSR $FB6F      ;Fix the power up byte
+START    LDA #$00       ;Non-printable char
+         JSR C3ROM      ;Turn on 80-columns
+         JSR PRINT      ;Print tittle line
+         ASC "By Javier Alvarado              "
+         ASC ' Assembler Pro '
+         ASC "    Copyright (C) 1992 by Quantum",00
+         LDA #$1B       ;Turn on MouseText
+         JSR COUT
+         LDA #$0F
+         JSR COUT
+         LDY #$00
+:1       LDX #$00
+         LDA #"S"       ;Dash char
+:2       JSR COUT       ;Print MouseText char
+         INX
+         CPX #80        ;Have we printed 80 dashes?
+         BCC :2         ;No, go back
+         CPY #$01       ;Have we printed bottom line too?
+         BEQ :3         ;Yes, skip forward
+         INY            ;Signal second line
+         STZ CH         ;Move to edge of screen
+         LDA #22
+         JSR TABV       ;Vtab to the 23 row
+         BRA :1         ;Print bottom line
+:3       LDA #$0E       ;Turn off MouseText
+         JSR COUT
+         LDA #$18
+         JSR COUT
+         LDA #$01       ;Move to second line
+         JSR TABV
+         LDA #"|"       ;Tab stop marker
+         LDX #$09       ;Print tab stop markers
+         STX CH
+         JSR COUT       ;Print first one
+         LDX #13
+         STX CH
+         JSR COUT       ;Print second one
+         LDX #26
+         STX CH
+         JSR COUT       ;Print last one
+         LDA #$02       ;Protect top two lines
+         STA $22
+         LDA #22        ;Protect bottom two lines
+         STA $23
+         LDA #23
+         STA CH         ;Center line on screen
+         LDA #$0A
+         JSR TABV       ;And eleventh line of screen
+         JSR PRINT      ;Print the next line
+         ASC "The date must be 1992 or later",8D,00
+         LDA #23
+         STA CH         ;Next line down
+         JSR PRINT      ;Print the next line
+         ASC "and in this format:  JAN 1, 1992",00
+         BIT STROBE     ;Clear the strobe
+         STZ INBUFF     ;Mark end of input
+         STZ CURSOR     ;Set insert mode
+         STZ LENGTH     ;Mark the length
+
+*============================
+* GET THE DATE:
+*============================
+
+*----------------------------
+* Check For a Date:
+*----------------------------
+CHK_DATE STZ CH         ;Move to edge of screen
+         LDA #23        ;And last line of screen
+         JSR TABV
+         STZ CH         ;Move cursor back to edge
+         JSR PRINT      ;Print the next line
+         ASC "Enter date or [Esc] to abort: ",00
+         LDA #12
+         STA MAXLEN     ;Set maximum length
+         STZ BUFFPOS    ;Move to start of buffer
+         LDA DATE       ;Get the date
+         BNE :1         ;If there's a date, go print
+         JMP DO_FLASH   ;Go enter enter the date 
+:1       LDX DATE+1     ;Get second byte of date
+
+*----------------------------
+* Print The Date:
+*----------------------------
+         STX TEMP       ;Save the date
+         STA TEMP+1
+         AND #%00011111 ;Isolate day
+         STA DAY        ;Save the day
+         LDA TEMP       ;Get the year/month
+         LSR            ;Isolate year
+         STA YEAR       ;Save the year
+         ROR TEMP+1     ;Move month to TEMP+1
+         LDA TEMP+1     ;Isolate month
+         LSR
+         LSR
+         LSR
+         LSR
+         DEA            ;Decrease the month
+         STA MONTH      ;Save the month
+         ASL            ;Multiply by 3
+         CLC
+         ADC MONTH
+         TAX            ;Move result to X-reg
+         LDY #$00       ;Initialize counter
+:2       LDA MONTHS,X   ;Get month character
+         CPY #$00
+         BEQ :2A
+         ORA #$A0       ;Covert to lowercase
+:2A      JSR COUT       ;Print the character
+         STA INBUFF,Y   ;Put it in the buffer too
+         INX            ;Increment index
+         INY            ;Increment counter
+         CPY #$03       ;Are we done?
+         BNE :2         ;No, go do next char
+         LDA #$A0       ;Print a space
+         JSR COUT
+         STA INBUFF,Y   ;Put space in buffer
+         INY
+         LDX DAY        ;Get the day
+         LDA #$00
+         PHY            ;Save Y-reg
+         JSR HEX_DEC    ;Conver hex to decimal
+         PLY            ;Restore Y-reg
+         LDX #$00       ;Clear the index
+:3       LDA $100,X     ;Get number from stack area
+         BEQ :3A        ;If zero, we're done
+         CMP #'.'       ;If a period, we're done too
+         BEQ :3A
+         ORA #$80       ;Turn on high bit
+         JSR COUT       ;Print the number
+         STA INBUFF,Y   ;Put it in the buffer
+         INY
+         INX
+         BRA :3         ;Do next digit
+:3A      LDA #","       ;Print a comma
+         JSR COUT
+         STA INBUFF,Y   ;Put it in the buffer
+         INY
+         LDA #$A0       ;Print a space
+         JSR COUT
+         STA INBUFF,Y   ;Put it in the buffer
+         INY
+         LDA #"1"       ;Print "19"
+         JSR COUT
+         STA INBUFF,Y   ;And put it in the buffer too
+         INY
+         LDA #"9"
+         JSR COUT
+         STA INBUFF,Y
+         INY
+         LDA #$00       ;Print last two digits of year
+         LDX YEAR
+         PHY            ;Save Y-reg
+         JSR HEX_DEC
+         PLY            ;Restore Y-reg
+         LDX #$00       ;Clear index
+:4       LDA $100,X     ;Get digit from stack area
+         BEQ :4A        ;If zero, we're done
+         CMP #'.'       ;If a period, we're done also
+         BEQ :4A
+         ORA #$80       ;Turn on high bit
+         JSR COUT       ;Print the digit
+         STA INBUFF,Y   ;Put it in the buffer
+         INY
+         INX
+         BRA :4
+:4A      TYA            ;Move length to X-Reg
+         TAX
+         STZ INBUFF,X   ;Mark new end
+         STX LENGTH     ;Save the length
+         STX BUFFPOS    ;Mark position in buffer
+
+*----------------------------
+* Enter the date:
+*----------------------------
+DO_FLASH JSR GET_KEY    ;Get a key
+         LDA SVKEY      ;Restore key
+         BIT OPN_APL    ;Check for Open-Apple
+         BMI DO_APL     ;Go handle Apple command
+         BIT CLSD_APL   ;Check for Closed-Apple
+         BPL ESC        ;If not pressed, go check others
+DO_APL   CMP #"E"       ;Was it OA-E?
+         BNE DO_FLASH   ;No, ignore it
+         LDA CURSOR     ;Get current status
+         EOR #$FF       ;Toggle it
+         STA CURSOR     ;Save the flag
+         BRA DO_FLASH   ;Get next key
+ESC      CMP #$9B       ;Is it [Esc]?
+         BNE DELETE     ;No, check other keys
+         STZ DATE       ;Clear the date registers
+         STZ DATE+1
+         JMP GO_ASM     ;Yes, go execute assembler
+DELETE   CMP #$FF       ;Is it [Delete]?
+         BNE RETURN     ;No, check next key
+         STZ PRT_CNTR   ;Clear the counter
+         LDX BUFFPOS    ;Get the position in buffer
+         BEQ DO_FLASH   ;If it's zero, ignore
+         LDA INBUFF,X   ;Get chacter at curr position
+         BEQ :B         ;If zero, skip all this
+         LDA #$88       ;Print a backspace
+         JSR COUT
+:A       LDA INBUFF,X   ;Get char at current position
+         BEQ :A1        ;If at end, delete char
+         JSR COUT       ;Print cahracter
+         INC PRT_CNTR   ;Add one to counter
+         STA INBUFF-1,X ;Move character back
+         INX            ;Get next character
+         BRA :A
+:A1      DEC BUFFPOS    ;Decrease position
+         DEX            ;Decrease index
+         STZ INBUFF,X   ;Mark new end
+         LDA #$A0       ;Erase last charcter
+         JSR COUT
+         LDA #$88
+         JSR COUT
+         LDX PRT_CNTR   ;Go back to where
+:A2      LDA #$88       ;you came from
+         JSR COUT
+         DEX            ;Decrease index
+         BNE :A2
+         DEC LENGTH
+         JMP DO_FLASH   ;Go get next key
+:B       DEX            ;One character back
+         DEC BUFFPOS
+         STZ INBUFF,X   ;Remove keypress from buffer
+         LDA #$88       ;Erase character
+         JSR COUT
+         LDA #$A0
+         JSR COUT
+         LDA #$88
+         JSR COUT
+         DEC LENGTH
+         JMP DO_FLASH   ;Get next key
+RETURN   CMP #$8D       ;Is it [Return]?
+         BNE LEFTARR    ;No, go check another
+         JMP GET_DATE   ;Go get the date
+LEFTARR  CMP #$88       ;Is it [<--]?
+         BNE RIGHTARR   ;No, go check another
+         LDX BUFFPOS    ;Check buffer position
+         BNE :A         ;If not zero, continue
+         JMP DO_FLASH   ;If it's zero igore
+:A       LDA #$88       ;Print a backspace
+         JSR COUT
+         DEC BUFFPOS    ;Save new position
+         JMP DO_FLASH   ;Go back
+RIGHTARR CMP #$95       ;Is it [-->]?
+         BNE SAVEKEY    ;No, check something else
+         LDX BUFFPOS    ;Get index
+         LDA INBUFF,X   ;Get chacter at current position
+         BNE :1         ;If not the end, do your stuff
+         JMP DO_FLASH   ;If end, ignore it
+:1       LDA INBUFF,X   ;Print character in buffer
+         JSR COUT
+         INC BUFFPOS    ;Move the cursor
+         JMP DO_FLASH
+SAVEKEY  LDA SVKEY      ;Restore key
+         CMP #$A0       ;Is it control character
+         BCS :OK        ;No continue
+:NO_GOOD JMP DO_FLASH   ;Unacceptable key, ignore
+:OK      STZ PRT_CNTR   ;Clear counter
+         LDX BUFFPOS    ;Get position in buffer
+         LDA CURSOR     ;Check for overstike cursor
+         BNE :A         ;If it is, go
+         LDA LENGTH     ;Get the length
+         CMP MAXLEN     ;Is it maximum length already?
+         BEQ :NO_GOOD   ;Yes, ignore key
+         LDA INBUFF,X
+         BNE :LOOP      ;If not on, end skip this
+         LDA SVKEY      ;Restore key
+         JSR COUT       ;Print it
+         STA INBUFF,X   ;Save it in the buffer
+         INC BUFFPOS    ;Add one to our position
+         STZ INBUFF+1,X ;Mark new end
+         INC LENGTH     ;One more char
+         JMP DO_FLASH   ;Repeat
+:LOOP    LDA SVKEY      ;Restore key
+         BEQ :RETURN    ;If it's zero, go finish up
+         JSR COUT       ;If it's not, print it
+         INC PRT_CNTR   ;Add one to counter
+         LDY INBUFF,X   ;Load and save char at
+         STY SVKEY      ;this position
+         STA INBUFF,X   ;Save old char in new position
+         INX            ;Get ready for next character
+         BRA :LOOP      ;Repeat
+:RETURN  INC BUFFPOS    ;Move one over
+         STZ INBUFF,X   ;Mark new end
+         LDX PRT_CNTR   ;Go back to where you came from
+         DEX
+:RET     LDA #$88       ;Go back to where
+         JSR COUT       ;you came from
+         DEX
+         BNE :RET
+         INC LENGTH
+         JMP DO_FLASH   ;Do next key
+:A       LDA INBUFF,X
+         BNE :A1        ;If it's not on end go
+         LDA LENGTH     ;Print and store character
+         CMP MAXLEN     ;Is it maximum length already?
+         BEQ :NO_GOOD   ;Ignore key
+         LDA SVKEY
+         JSR COUT       ;Print the character
+         STA INBUFF,X   ;If it is, save key
+         INX
+         INC BUFFPOS    ;Save new position
+         STZ INBUFF,X   ;Mark new end
+         INC LENGTH
+         JMP DO_FLASH
+:A1      LDA SVKEY      ;Restore character
+         JSR COUT
+         STA INBUFF,X
+         INX
+         INC BUFFPOS    ;Save new position
+         JMP DO_FLASH   ;Repeat
+
+*----------------------------
+* Get Date From Input:
+*----------------------------
+GET_DATE LDA #$01       ;Initialize counter
+         STA TEMP
+         LDX #$00       ;Clear indexes
+         LDY #$00
+:1       LDA INBUFF,X   ;Get character from buffer
+         AND #$DF       ;Convert to uppercase
+:2       CPY #36        ;Are we out of months
+         BCC :2A        ;No, so continue
+         JMP ERROR      ;Oh, darn!
+:2A      CPX #$00
+         CMP MONTHS,Y   ;Compare it to month text
+         BEQ :3         ;Could be a match
+         INC TEMP       ;Add one to counter
+         INY            ;Move Y-reg to next month
+         INY
+         INY
+         BRA :2         ;Go check for next month
+:3       INX            ;Next char in buffer
+         INY            ;Next char in months text
+         LDA INBUFF,X   ;Get the next character
+         AND #$DF       ;Convert to uppercase
+         CMP MONTHS,Y   ;Compare it to month text
+         BEQ :4         ;Could be a match
+         LDX #$00       ;Move back to beginning
+         INY            ;Move on to next month
+         INY
+         INC TEMP       ;Increment counter
+         BRA :1
+:4       INX            ;Next char in buffer
+         INY            ;Next char in months text
+         LDA INBUFF,X   ;Get next character from buffer
+         AND #$DF       ;Convert to uppercase
+         CMP MONTHS,Y   ;Compare it to months string
+         BEQ :5         ;We got the month!
+         INY            ;Next char in months text
+         LDX #$00       ;Back to start of buffer
+         INC TEMP       ;Add one to the counter
+         BRA :1
+:5       LDA TEMP       ;Get the month number
+         STA MONTH      ;and save it in month storage
+         LDY #$03       ;Initilize index
+         LDA INBUFF,Y   ;Get character after month
+         CMP #$A0       ;It should be a space
+         BNE ERROR      ;It's not a space
+         INY            ;Move to next char
+         LDA INBUFF,Y   ;Get first digit of number
+         INY            ;move to next char
+         LDX INBUFF,Y   ;Get second digit
+         CPX #","       ;Is it a comma?
+         BNE :6         ;No, go ahead
+         SEC            ;Prepare for subtraction
+         SBC #"0"       ;Convert ASCII to value
+         BRA :6A        ;We got the day already
+:6       JSR CONVERT    ;Convert to hex
+         LDX MONTH      ;Get the month
+         DEX            ;For comparison
+         CMP MAXDAYS,X  ;Is it too large?
+         BCS ERROR      ;Yes, what a yutz!
+         INY            ;Move on to next char
+:6A      STA DAY        ;Save the number of the day
+         LDA INBUFF,Y   ;Get the next character
+         CMP #","       ;Is it a comma?
+         BNE ERROR      ;No, what a moron!
+         INY            ;Prepare for next char
+         LDA INBUFF,Y   ;Get it
+         CMP #$A0       ;Is it a space?
+         BNE ERROR      ;No, idiot!
+         INY            ;Prepare for next
+         LDA INBUFF,Y   ;Get first digit of year
+         INY
+         LDX INBUFF,Y   ;Get second digit of year
+         JSR CONVERT    ;Convert to hex
+         CMP #19        ;Is it less than 19?
+         BCC ERROR      ;Yes, invalid
+         STA TEMP       ;It's a good year, save it
+         INY
+         LDA INBUFF,Y   ;Get third digit of year
+         INY
+         LDX INBUFF,Y   ;Get last digit
+         JSR CONVERT    ;Convert to hex
+         CMP #90        ;Is it greater than 90?
+         BCC ERROR      ;No, what a dope!
+:7       STA YEAR       ;Valid year, so save it
+         INY
+         LDA INBUFF,Y   ;Get next char
+         BNE ERROR
+         BRA ENCODE     ;Go encode date
+ERROR    JSR BELL       ;Ring the bell
+         JMP CHK_DATE   ;Go get input again
+ENCODE   LDA YEAR       ;Get stored year
+         STA TEMP       ;Store it temporarily
+         LDA MONTH      ;Get saved month
+         ASL            ;Shift bits
+         ASL
+         ASL
+         ASL
+         STA TEMP+1     ;Save it
+         ASL TEMP+1     ;Move last bit of month
+         ROL TEMP       ;into first bit of year
+         LDA TEMP       ;Move it to ProDOS register
+         STA DATE+1
+         LDA DAY        ;Get the saved date
+         ORA TEMP+1
+         STA DATE       ;Save result in ProDOS
+
+*============================
+* EXECUTE ASSEMBLER PRO:
+*============================
+
+GO_ASM   STZ CH         ;Move to edge of screen
+         LDA #23        ;Move to bottom line
+         JSR TABV
+         JSR CLREOL     ;Clear bottom line
+         JSR HOME       ;Clear the screen
+         JSR MLI        ;Do OPEN call
+         HEX C8
+         DA  OPENPARM
+         BCS MLI_ERR    ;We have an error
+         LDA REF_NUM    ;Get the file's reference number
+         STA REF_NUM2   ;and copy it to other lists
+         STA REF_NUM3
+         JSR MLI        ;Do GET_EOF call
+         HEX D1
+         DA  EOFPARM
+         BCS MLI_ERR    ;Oh, no!
+         LDA EOF        ;Get the length
+         LDX EOF+1      ;and move it to the request count
+         STA REQUEST
+         STX REQUEST+1
+         JSR MLI        ;Do READ call
+         HEX CA
+         DA  READPARM
+         BCS MLI_ERR    ;Oh, nuts!
+         JSR MLI        ;Do CLOSE call
+         HEX CC
+         DA  CLOSPARM
+         LDA #$FF
+         STA BUFFPOS
+         STZ $1FFF
+         LDX #$01
+         LDA #$00
+:1       BIT $C019
+         BPL :1
+:2       BIT $C019
+         BMI :2
+         JSR $ED24
+         JSR HOME
+         JMP $0806      ;Go into the assembler!
+MLI_ERR  JSR MLI        ;Close any open files
+         HEX CC
+         DA  CLOSPARM
+         STZ CH         ;Move to edge of screen
+         LDA #23
+         JSR TABV       ;Move to bottom line
+         JSR PRINT      ;Print the next line
+         ASC "Unable to load assembler.  Press any key to "
+         ASC "try again. ",00
+         STZ BUFFPOS    ;Move to start of buffer
+         STZ INBUFF
+         JSR GET_KEY    ;Get a keypress
+         JMP GO_ASM     ;Try again
+
+*============================
+* SUBROUTINES:
+*============================
+
+GET_KEY  LDA #$00       ;Make sure that the
+         STA TIMER      ;cursor is displayed after
+         LDA COUNTER+1  ;every keypress
+         STA TIMER+1
+         STZ CUR_DISP
+GETKEY   LDA TIMER      ;Time to increase high byte?
+         BNE CONT       ;No, so continue
+         LDA TIMER+1    ;Yes, check it
+COUNTER  CMP #$00       ;$00 is modified!
+         BEQ FLASH      ;Yes, go flash cursor
+         INC TIMER+1    ;No, increase
+         INC TIMER
+         BRA GETKEY
+CONT     INC TIMER      ;No so increase timer
+         LDA KEYBOARD   ;Was a key pressed?
+         BPL GETKEY     ;No, so repeat
+         STA SVKEY
+         BIT STROBE     ;Yes, so clear strobe
+         LDX BUFFPOS
+         LDA INBUFF,X   ;Get char at current location
+         BNE :A         ;If it's not zero, skip this
+         LDA #$A0       ;If it is, get a space
+:A       JSR COUT       ;Print character
+         LDA #$88       ;Print a backspace
+         JSR COUT
+         RTS
+FLASH    LDA CUR_DISP   ;Display cursor or character?
+         BEQ DOCURSOR   ;Go display cursor
+         LDX BUFFPOS    ;Get position in buffer
+         LDA INBUFF,X   ;Get chacter there
+         BNE DO_CHAR    ;If it's not a zero, print char
+         LDA #$A0       ;If a zero, print a space
+DO_CHAR  JSR COUT       ;Print it
+         LDA #$50       ;Modify counter
+         STA COUNTER+1
+         LDA #$88       ;Print backspace
+         JSR COUT
+         STZ CUR_DISP   ;Next time print cursor
+         STZ TIMER      ;Clear the timer
+         STZ TIMER+1
+         JMP GETKEY
+DOCURSOR LDA CURSOR     ;Which cursor?
+         BEQ INSERT     ;If it's zero, do insert cursor
+         LDX BUFFPOS    ;Get position in buffer
+         LDA INBUFF,X   ;Get character in position
+         BNE :2         ;If not on end, go
+:1       LDA #$20       ;Cursor is inverse space
+         BRA PRT_CUR
+:2       SEC
+         SBC #$80       ;Make char inverse
+         BRA PRT_CUR
+INSERT   LDA #"_"       ;Cursor is underline
+PRT_CUR  JSR COUT       ;Print the cursor
+         LDA #$20       ;Modify counter
+         STA COUNTER+1
+         LDA #$88       ;Print backspace
+         JSR COUT
+         STA CUR_DISP   ;Next time print letter
+         STZ TIMER      ;Clear timer
+         STZ TIMER+1
+         JMP GETKEY
+
+CONVERT  CMP #"0"       ;Check that they are digits
+         BCC :1
+         CPX #"0"
+         BCC :1
+         CMP #":"
+         BCS :1
+         CPX #":"
+         BCS :1
+         AND #$0F
+         STA TEMP       ;Save result
+         ASL            ;Multiply by 2
+         ASL            ;Multiply by 2
+         CLC            ;Prepare for addition
+         ADC TEMP       ;Mutiplied by 5
+         ASL            ;Multiply by 2 again
+         STA TEMP       ;Save result
+         TXA            ;Now do the X-reg
+         AND #$0F
+         CLC            ;Prepare for addition
+         ADC TEMP
+         CLC            ;Signal no error
+         RTS            ;Return with number in Acc
+:1       PLA            ;Remove return address from stack
+         PLA
+         JMP ERROR      ;Signal error and enter date again
+
+PRINT    PLA            ;Get low byte of address
+         STA TEMP       ;Save it
+         PLA            ;Get high byte
+         STA TEMP+1     ;Save the address
+:1       INC TEMP
+         BNE :2
+         INC TEMP+1
+:2       LDA (TEMP)     ;Get char from string
+         BEQ :3         ;If zero, go end
+         JSR COUT       ;Print the character
+         BRA :1         ;Do next char
+:3       LDA TEMP+1     ;Get HOB of address
+         PHA            ;Save it on stack
+         LDA TEMP       ;Get LOB of address
+         PHA            ;Save it on stack
+         RTS            ;Return past text
+
+HEX_DEC  STA $9E        ;Save number for conversion
+         STX $9F
+         LDX #$90       ;X-Reg must be 90
+         SEC            ;Carry must be set
+         JSR LINPRT1    ;Put decimal number in FAC
+         JMP FOUT       ;Put decimal number on the stack
+
+*============================
+* DATA AND MLI PARM LISTS:
+*============================
+
+MONTHS   ASC "JANFEBMARAPRMAYJUN"
+         ASC "JULAUGSEPOCTNOVDEC"
+MAXDAYS  DFB 32,29,32,31,32,31
+         DFB 32,32,31,32,31,32
+
+OPENPARM HEX 03         ;Parameter count
+         DA  PATHNAME   ;Address of pathname
+         HEX 00,60      ;Address of buffer ($6000)
+REF_NUM  HEX 00         ;Reference number
+
+EOFPARM  HEX 02         ;Parameter count
+REF_NUM2 HEX 00         ;Reference number
+EOF      HEX 00,00,00   ;EOF (length of file)
+
+READPARM HEX 04         ;Parameter count
+REF_NUM3 HEX 00         ;File reference number
+         HEX 00,08      ;Loading address ($800)
+REQUEST  HEX 00,00      ;Number of bytes to read
+         HEX 00,00
+
+CLOSPARM HEX 01         ;Parameter count
+         HEX 00         ;All files
+
+PATHNAME STR '/QUANTUM.SYSTEM/ASSEMBLER.PRO'

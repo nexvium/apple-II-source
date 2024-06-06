@@ -1,0 +1,472 @@
+* MenuPro 1.0
+* By Javier Alvarado
+* Copyright (C) 1992
+* DefKar
+* February 2, 1992
+
+TEMPTR   EQU $01        ;Temporary pointer
+VARPTR   EQU $03        ;Variable pointer
+TBLPTR   EQU $05        ;Search pointer
+CHARAC   EQU $0D
+ENDCHR   EQU $0E
+VARTYP   EQU $11        ;Variable type
+CH       EQU $24        ;Cursor's horizontal position
+INVFLG   EQU $32        ;Inverse flag
+FORPNT   EQU $85
+CHRGET   EQU $B1        ;Advance TXTPTR and get char
+TXTPTR   EQU $B8        ;Text pointer
+ERROUT   EQU $BE09      ;Print BASIC.SYSTEM error
+GETBUFR  EQU $BEF5      ;Get buffer space
+FREBUFR  EQU $BEF8      ;Release all buffer space
+KEYBOARD EQU $C000      ;Keyboard location
+STROBE   EQU $C010      ;Keyboard strobe
+SPEAKER  EQU $C030      ;Speaker location
+ERROR    EQU $D412      ;Print an Applesoft error
+LET2     EQU $DA7B
+FRMNUM   EQU $DD67
+CHKCOM   EQU $DEBE      ;Check for comma at TXTPTR
+PTRGET   EQU $DFE3      ;Get pointer to variable
+STRLT2   EQU $E3ED
+TXTLIT   EQU $E73D
+GETADR   EQU $E752
+TABV     EQU $FB5B      ;VTAB cursor
+WAIT     EQU $FCA8      ;Waste time
+CROUT    EQU $FD8E      ;Output a carriage return
+COUT     EQU $FDED      ;Output a character
+
+         ORG $6000
+
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+* Set up MenuPro:
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+START    LDA DEST+1     ;Check destination address
+         CMP #$97
+         BEQ DEFAULT    ;Use default of program
+         BCS ERR        ;Can't be higher than $9800
+         BRA RELOCATE
+ERR      LDA #$0C       ;NO BUFFERS AVAILABLE
+         JMP ERROUT     ;Print it and exit
+DEFAULT  LDA #$03       ;We need  pages
+         JSR GETBUFR    ;Get them
+         BCS ERR        ;We got a problem here
+         STA DEST+1
+RELOCATE LDX #MVSTART   ;Get address of code
+         LDA #<MVSTART
+         STX $3A
+         STA $3B
+         LDA DEST+1     ;Get destination address
+         SEC
+         SBC #$08
+         STA $4E        ;Save offset
+         LDY #$00       ;Clear index
+:1       LDA ($3A),Y    ;Get Op Code from program
+         JSR $FD5D      ;Find info about Op Code
+         LDA $2F        ;Put length in Acc
+         CMP #$03       ;Is it three bytes long?
+         BEQ :4         ;Yes, relocate it
+:2       CLC            ;Point to next byte
+         ADC $3A
+         STA $3A
+         BCC :3
+         INC $3B
+:3       LDA $3B        ;Get page of location
+         CMP #<MVEND    ;Is it the end?
+         BNE :1         ;No, do next command
+         LDA $3A
+         CMP #MVEND
+         BNE :1
+         BRA MOVE       ;Relocation's done
+:4       INY            ;Point to high byte of address
+         INY
+         LDA ($3A),Y
+         CMP #<CHK_OURS ;Is address within program?
+         BCC :5         ;No, don't relocate
+         CMP #<CDEND+$100
+         BCS :5
+         CLC            ;Relocate command
+         ADC $4E
+         STA ($3A),Y    ;Put it back in program
+:5       LDY #$00       ;Clear index again
+         LDA #$03       ;Set length again
+         BRA :2         ;Advance pointer
+MOVE     LDX $3F6       ;Save current amper vector
+         LDA $3F7
+         STX MVSTART+1
+         STA MVSTART+2
+         LDX #MVSTART   ;Set start address
+         LDA #<MVSTART
+         STX $3C
+         STA $3D
+         LDX #MVEND     ;Set end address
+         LDA #<MVEND
+         STX $3E
+         STA $3F
+         LDX #$00       ;Set destination address
+DEST     LDA #$97
+         STX $42
+         STA $43
+         JSR $FE2C      ;Move routine
+         LDA #$4C       ;Set up amper vector
+         STA $3F5
+         LDX #$03
+         LDA DEST+1
+         STX $3F6
+         STA $3F7
+         RTS            ;Return to BASIC
+MVSTART  EQU *
+
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+* MenuPro Main Program:
+*=-=-=-=-=-=-=-=-=-=-=-=-==-==
+         ORG $0800      ;For relocation purposes
+
+NOTOURS  JMP $0000      ;Check any other routines
+CHK_OURS CMP #'M'       ;Is it menu command?
+         BNE NOTOURS    ;No, check others
+         JSR CHRGET     ;Advance TXTPTR
+         JSR CHKCOM     ;Process the comma
+         STZ MENUTYPE   ;Set vertical menu
+         CMP #'V'       ;Is it vertical menu?
+         BEQ :1
+         DEC MENUTYPE   ;Set horizontal menu
+         CMP #'H'       ;Is it horizontal menu?
+         BNE SYNERR     ;Neither, print error
+:1       JSR CHRGET
+         JSR CHKCOM
+         CLC            ;Signal checking first char
+         JSR CHKCHR     ;Make sure it's valid
+         BCS SYNERR     ;Bad variable
+         STA $02A0      ;Store it in the buffer
+         JSR CHRGET     ;Get second char of variable
+         CMP #'$'       ;Is it string symbol?
+         BEQ :2
+         SEC            ;Signal checking second char
+         JSR CHKCHR
+         BCS SYNERR
+         BRA :3
+:2       LDA #$00       ;Make variable two chars long
+:3       ORA #$80       ;Turn high bit on (string var)
+         STA $02A1      ;Save second char of variable
+         CMP #$80       ;Did we get "$" already?
+         BEQ :4
+         JSR CHRGET     ;Get next char or var
+         CMP #'$'       ;Is it string symbol?
+         BNE MATCHERR   ;No, print error
+:4       JSR CHRGET
+         CMP #'('
+         BNE SYNERR
+         JSR FRMNUM     ;Evaluate number at TXTPTR
+         JSR GETADR     ;Make it an interger
+         LDA $50        ;Get it
+         BEQ QUANTERR   ;Can't be zero
+         STA POS        ;Set start
+         JSR CHKCOM     ;Process comma
+         JSR PTRGET     ;Get pointer to variable
+         BIT VARTYP     ;Check variable type
+         BEQ MATCHERR   ;Must be a string variable
+         STA FORPNT     ;Save pointer to variable
+         STY FORPNT+1
+         BRA MENU       ;Go print menu
+SYNERR   LDX #$10       ;SYNTAX ERROR
+         BRA *+2
+MATCHERR LDX #$A3       ;TYPE MISMATCH ERROR
+         BRA *+2
+QUANTERR LDX #$35       ;ILLEGAL QUANTITY ERROR
+         JMP ERROR
+MENU     LDX $6B        ;Get address of array table
+         LDA $6C
+         STX TBLPTR     ;Copy it
+         STA TBLPTR+1
+:1       LDY #$00
+         LDA (TBLPTR),Y ;Get variable name
+         CMP $02A0      ;Is it same as ours?
+         BNE :2         ;No, check next
+         INY
+         LDA (TBLPTR),Y
+         CMP $02A1
+         BEQ :3         ;We found it
+:2       LDY #$02
+         LDA (TBLPTR),Y ;Get offset to next array
+         CLC
+         ADC TBLPTR     ;Add to current to find next
+         STA TBLPTR
+         BCC :2A
+         INC TBLPTR+1
+:2A      LDA TBLPTR+1   ;Check if we are at the end
+         CMP $6E        ;of table of arrays
+         BCC :1
+         LDA TBLPTR
+         CMP $6D
+         BCC :1
+         BRA QUANTERR
+:3       LDY #$06
+         LDA POS        ;Get default selection
+         CMP (TBLPTR),Y ;Get number of options
+         BCS QUANTERR   ;No such number
+         LDA (TBLPTR),Y ;Can't have more than 9
+         CMP #$0B
+         BCS QUANTERR
+         BIT MENUTYPE   ;Check if it's horizontal menu
+         BMI :4         ;It is, skip ahead
+         CLC
+         ADC $25        ;Make sure it fits on screen
+         CMP #25
+         BCS QUANTERR   ;Causes screen to scroll
+         LDA (TBLPTR),Y
+:4       STA ENTRIES
+         LDA #$07       ;Point TBLPTR to var addresses
+         CLC
+         ADC TBLPTR
+         STA TBLPTR
+         BCC :5
+         INC TBLPTR+1
+:5       LDA $24        ;Save cursor's position
+         STA CHSTORE
+         LDA $25
+         JSR SETNORM    ;Set normal text
+         STA CVSTORE
+         BIT MENUTYPE   ;Get the type of menu
+         BPL VMENU      ;If plus, do vertical menu
+         JMP HMENU      ;If minus, do horizontal menu
+VMENU    BIT STROBE     ;Clear the strobe
+         LDY #$01
+         STY POS+1
+         STY CURRENT
+:1       LDA CURRENT    ;Get selection number
+         PHA
+         CLC
+         ADC #$B0       ;Print selection number
+         JSR COUT
+         LDA #"."       ;Print period and a space
+         JSR COUT
+         LDA #$A0
+         JSR COUT
+         PLA            ;Restore selection number
+         JSR PRTSEL     ;Print selection
+         JSR CROUT      ;Print cariage return
+         LDA CHSTORE
+         STA CH
+         INC CURRENT
+         LDA CURRENT
+         CMP ENTRIES
+         BCC :1         ;Print the next selection
+:2       LDA POS+1      ;Get old position
+         JSR PRTSEL     ;Print in normal text
+         LDA POS        ;Get new position
+         STA POS+1      ;Save again
+         JSR SETINV     ;Set inverse
+         JSR PRTSEL     ;Print it in inverse
+         JSR SETNORM    ;Set normal text again
+:3       LDA KEYBOARD   ;Get a keypress
+         BPL :3         ;If no key, try again
+         BIT STROBE     ;Clear strobe again
+         CMP #$9B       ;Was it [Esc]?
+         BEQ :ESC
+         CMP #$8B       ;Was it up arrow?
+         BEQ :UP
+         CMP #$8A       ;Was it down arrow?
+         BEQ :DOWN
+         CMP #$8D       ;Was it [Return]?
+         BEQ :RETRN
+         SEC
+         SBC #$B0
+         CMP #$01       ;Was it a number?
+         BCC :4
+         CMP ENTRIES
+         BCS :4
+         STA POS
+         BRA :2
+:4       BIT SPEAKER    ;Toggle the speaker
+         LDA #$1B       ;Set length of wait (tone)
+         JSR WAIT       ;and waste that much time
+         BIT STROBE     ;Was the key released?
+         BMI :4         ;No, continue with the sound
+         BRA :3
+:UP      DEC POS        ;Move one selection up
+         BNE :2
+         LDA ENTRIES    ;Wrap down to the bottom
+         DEC
+         STA POS
+         BRA :2
+:DOWN    INC POS        ;Move one selection down
+         LDA POS        ;Check if we need to wrap-around
+         CMP ENTRIES
+         BCC :2
+         LDA #$01       ;Set first selection
+         STA POS
+         BRA :2
+:ESC     LDA #$EB       ;Load Escape character
+         BRA :GB
+:RETRN   LDA CHSTORE    ;Print "-->"
+         STA CH
+         LDX #$00
+:R1      LDA ARROW,X
+         BEQ :GB
+         JSR COUT
+         INX
+         BRA :R1
+:R2      LDA POS
+:GB      PHA
+         LDA POS        ;Get position
+         JSR PRTSEL     ;Print in normal again
+         PLA
+         CLC
+         ADC #$30       ;Make number -> ASCII
+         JMP GO_BASIC   ;Return to BASIC
+HMENU    BIT STROBE     ;Clear strobe
+         LDY #$01
+         STY CURRENT
+         LDA CVSTORE    ;Move cursor to start of menu
+         JSR TABV
+         LDA CHSTORE
+         STA CH
+:1       LDA CURRENT    ;Get number to be printed
+         CMP POS        ;Is it current position?
+         BNE *+3
+         JSR SETINV     ;Yes, print in inverse
+         JSR PRTSELH    ;Print selection
+         JSR SETNORM    ;Set normal text again
+         INC CURRENT
+         LDA CURRENT
+         CMP ENTRIES    ;Are we done?
+         BCC :1         ;No, do it again
+:2       LDA KEYBOARD   ;Wait for a key press
+         BPL :2
+         CMP #$88       ;Was it left arrow?
+         BEQ :LEFT
+         CMP #$95       ;Was it right arrow?
+         BEQ :RIGHT
+         CMP #$9B       ;Was it Escape?
+         BEQ :ESC
+         CMP #$8D       ;Was it Return?
+         BEQ :RETRN
+         AND #$DF       ;Make sure letters are uppecase
+         LDX #$01
+:3       CMP FIRSTCHR-1,X ;Is it one of our keys?
+         BNE :3A
+         STX POS        ;Save new position
+         BRA :RETRN
+:3A      INX
+         CPX ENTRIES
+         BCC :3
+:4       BIT SPEAKER    ;Toggle the speaker
+         LDA #$1B       ;Set length of wait (tone)
+         JSR WAIT       ;and waste that much time
+         BIT STROBE     ;Was the key released?
+         BMI :4         ;No, continue with the sound
+         BRA :2
+:LEFT    LDA POS        ;Get position number
+         DEC            ;Move one back
+         BEQ :4
+         STA POS        ;Save new position
+         BRA HMENU      ;Print menu again
+:RIGHT   LDA POS        ;Get position number
+         INC            ;Move one forward
+         CMP ENTRIES    ;Is it too far?
+         BCS :4
+         STA POS        ;Sve new position
+         BRA HMENU      ;Print menu again
+:ESC     LDA #$1B       ;Load Escape character
+         BRA GO_BASIC
+:RETRN   LDX POS        ;Get position number
+         LDA FIRSTCHR-1,X ;Get first character of option
+         AND #$7F       ;Turn high bit off
+GO_BASIC STA $200       ;Put result in input buffer
+         STZ $201       ;Mark the end
+         LDX TXTPTR     ;Save TXTPTR
+         LDA TXTPTR+1
+         PHA
+         PHX
+         LDA #$00       ;Load address of buffer
+         LDY #$02
+         JSR STRLT2     ;Build description for string
+         JSR TXTLIT     ;Set up pointer for LET
+         JSR LET2       ;and save variable
+         PLX
+         PLA
+         STX TXTPTR     ;Restore TXTPTR
+         STA TXTPTR+1
+         BIT STROBE
+         RTS            ;Return to BASIC
+
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+* Subroutines:
+*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+PRTSEL   JSR HVTAB      ;Move cursor to position
+PRTSELH  PHA
+         STA VARDATA
+         ASL            ;Multiply by two
+         ADC VARDATA    ;Add original (x3)
+         STA VARDATA
+         TAY
+         LDA (TBLPTR),Y ;Get length
+         STA VARDATA+1
+         INY
+         LDA (TBLPTR),Y ;Get address of string
+         STA TEMPTR
+         INY
+         LDA (TBLPTR),Y
+         STA TEMPTR+1
+         LDA #$A0       ;Print leading space
+         JSR COUT
+         LDY #$00
+         LDA (TEMPTR),Y ;Get first character
+         ORA #$80       ;Turn it's high bit on
+         AND #$DF       ;Ensure uppercase
+         PLY
+         STA FIRSTCHR-1,Y ;Save first char (for HMENU)
+         LDY #$00
+:1       LDA (TEMPTR),Y ;Get char
+         ORA #$80       ;Turn it's high bit on
+         CMP #$A0       ;Don't print ctrl char
+         BCC :2
+         JSR COUT       ;Print character
+:2       INY
+         CPY VARDATA+1  ;Are we done?
+         BCC :1         ;Nope
+         LDA #$A0       ;Print trailing space
+         JSR COUT
+         RTS
+CHKCHR   BCC :1         ;Checking first char
+         CMP #'0'       ;Make sure character is a
+         BCC :3         ;valid variable character
+         CMP #':'
+         BCC :2
+:1       CMP #'A'
+         BCC :3
+         CMP #'['
+         BCS :3
+:2       CLC            ;Signal valid character
+         RTS
+:3       SEC            ;Signal bad character
+         RTS
+HVTAB    PHA            ;Save number
+         CLC            ;Prepare for addition
+         DEC
+         ADC CVSTORE
+         JSR TABV       ;Move cursor to right location
+         LDX CHSTORE
+         INX
+         INX
+         INX
+         STX CH
+         PLA
+         RTS
+SETINV   LDX #$3F       ;Set inverse text
+         BRA *+2
+SETNORM  LDX #$FF       ;Set normal text
+         STX INVFLG
+         RTS
+
+CHSTORE  HEX 00         ;Store horizontal cursor
+CVSTORE  HEX 00         ;Store vertical position
+ENTRIES  HEX 00         ;Entries in menu
+POS      HEX 00,00      ;Current,Last menu position
+MENUTYPE HEX 00         ;PL=vertical, MI=horizontal
+CURRENT  HEX 00
+VARDATA  HEX 00,00      ;Offset, length
+FIRSTCHR DFS 09         ;First chars of options
+ARROW    HEX 1B,53,53,55,18,00
+CDEND    EQU *
+CDLEN    EQU CDEND-$0800
+MVEND    EQU MVSTART+CDLEN
